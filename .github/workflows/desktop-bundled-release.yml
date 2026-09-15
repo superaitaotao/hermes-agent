@@ -198,11 +198,6 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           ref: ${{ (inputs.build_commit != '' || inputs.channel_build != '') && github.sha || inputs.tag }}
-          # Tag admission runs merge-base against origin/main and needs the
-          # shared ancestry; channel/commit admission exits before any
-          # history read, so those fetch exactly one commit.
-          fetch-depth: ${{ (inputs.build_commit != '' || inputs.channel_build != '') && 1 || 0 }}
-          fetch-tags: ${{ inputs.build_commit == '' && inputs.channel_build == '' }}
 
       - name: Set up native identity reader
         if: inputs.disposable_channel != '' && inputs.disposable_receivers
@@ -1197,7 +1192,8 @@ jobs:
 
   publish-channel:
     name: Publish the complete native-smoked channel build
-    needs: [validate, build-darwin, build-win32, assemble-win32-bundle, smoke-darwin, smoke-win32, smoke-win32-universal]
+    needs:
+      [validate, build-darwin, build-win32, assemble-win32-bundle, smoke-darwin, smoke-win32, smoke-win32-universal]
     if: >-
       !cancelled() && needs.validate.outputs.channel-build != '' && needs.validate.result == 'success'
       && needs.build-darwin.result == 'success' && needs.build-win32.result == 'success'
@@ -1755,7 +1751,20 @@ jobs:
 
   builds-table:
     name: Render the release builds table
-    needs: [validate, build-win32, build-darwin, build-linux, assemble-win32-bundle, smoke-darwin, smoke-win32, smoke-win32-universal, publish-win32-updater, publish-darwin-updater, termux-deb]
+    needs:
+      [
+        validate,
+        build-win32,
+        build-darwin,
+        build-linux,
+        assemble-win32-bundle,
+        smoke-darwin,
+        smoke-win32,
+        smoke-win32-universal,
+        publish-win32-updater,
+        publish-darwin-updater,
+        termux-deb
+      ]
     # Failed builds still get a per-tag diagnostic page. The renderer only
     # advances the channel landing page when every prerequisite succeeded.
     if: |
@@ -1799,7 +1808,18 @@ jobs:
 
   commit-builds-summary:
     name: Commit build summary (every binary, built or not)
-    needs: [validate, build-win32, build-darwin, build-linux, assemble-win32-bundle, smoke-darwin, smoke-win32, smoke-win32-universal, termux-deb]
+    needs:
+      [
+        validate,
+        build-win32,
+        build-darwin,
+        build-linux,
+        assemble-win32-bundle,
+        smoke-darwin,
+        smoke-win32,
+        smoke-win32-universal,
+        termux-deb
+      ]
     if: |
       always() && inputs.build_commit != '' && inputs.disposable_channel == ''
       && needs.validate.result == 'success' && needs.validate.outputs.sha != ''
@@ -1842,7 +1862,17 @@ jobs:
 
   candidate-manifest:
     name: Stage verified stable candidate artifacts
-    needs: [validate, build-win32, build-darwin, assemble-win32-bundle, smoke-darwin, smoke-win32, smoke-win32-universal, termux-deb]
+    needs:
+      [
+        validate,
+        build-win32,
+        build-darwin,
+        assemble-win32-bundle,
+        smoke-darwin,
+        smoke-win32,
+        smoke-win32-universal,
+        termux-deb
+      ]
     if: >-
       !cancelled() && inputs.release-phase == 'candidate'
       && needs.validate.result == 'success' && needs.validate.outputs.sha != ''
@@ -2016,7 +2046,20 @@ jobs:
 
   publish-canary:
     name: Publish the canary release
-    needs: [validate, build-win32, build-darwin, build-linux, builds-table, assemble-win32-bundle, smoke-darwin, smoke-win32, smoke-win32-universal, publish-win32-updater, publish-darwin-updater]
+    needs:
+      [
+        validate,
+        build-win32,
+        build-darwin,
+        build-linux,
+        builds-table,
+        assemble-win32-bundle,
+        smoke-darwin,
+        smoke-win32,
+        smoke-win32-universal,
+        publish-win32-updater,
+        publish-darwin-updater
+      ]
     if: |
       always()
       && inputs.build_commit == '' && inputs.channel_build == ''
