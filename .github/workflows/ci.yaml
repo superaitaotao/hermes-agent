@@ -289,6 +289,39 @@ jobs:
       deps: ${{ needs.detect.outputs.deps == 'true' }}
 
   # ─────────────────────────────────────────────────────────────────────
+  # Root broker / unprivileged consumer boundary (protected-write consent).
+  #
+  # This is the only lane that can prove the authority boundary: the broker runs
+  # as ROOT from the hash-pinned bundle while the consumer is the unprivileged
+  # runner. `tests/integration/` is excluded from the default pytest lane (like
+  # `tests/e2e/`), so the suite is named explicitly here, and it FAILS — never
+  # skips — when the root capability or its marker is missing. Required, because
+  # a green aggregate must not be reachable without this proof.
+  # ─────────────────────────────────────────────────────────────────────
+  protected-write-privileged:
+    name: Protected-write privileged boundary
+    needs: detect
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
+
+      - name: Set up locked Python and test dependencies
+        uses: ./.github/actions/setup-pm
+        with:
+          extras: '[]'
+          test-environment: 'true'
+
+      - name: Run the root-broker / unprivileged-consumer suite
+        env:
+          # The lane marker: the suite fails without it instead of skipping.
+          # `--include-integration` is required: tests/integration/ is excluded
+          # from default discovery, so without it the lane would pass vacuously.
+          HERMES_PROTECTED_WRITE_PRIVILEGED: "1"
+        run: scripts/run_tests.sh --include-integration tests/integration/protected_write
+
+  # ─────────────────────────────────────────────────────────────────────
   # Gate: runs after everything. ``if: always()`` ensures it reports a
   # status even when some deps were skipped.
   #
@@ -328,6 +361,7 @@ jobs:
       - docker-lint
       - profile-artifact-check
       - icons-freshness-check
+      - protected-write-privileged
       - supply-chain
       # OSV runs weekly against main (osv-scanner.yml schedule), not per PR:
       # every PR was reporting the same repo-wide baseline of pinned-dep CVEs

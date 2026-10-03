@@ -68,3 +68,44 @@ def build_approvals_parser(subparsers, *, cmd_approvals: Callable) -> None:
     test_parser.set_defaults(func=cmd_approvals)
 
     approvals_parser.set_defaults(func=cmd_approvals)
+
+    protected_parser = approvals_subparsers.add_parser(
+        "protected-write",
+        help="Preview and inspect protected-write consent (never issues a grant)",
+        description="Preview one file-tool operation deterministically and read the "
+            "local authority status. This surface cannot register a run, issue a "
+            "grant, extend an expiry or bypass confirmation: registration and "
+            "issuance are separate root admin actions outside the agent session.")
+    protected_subparsers = protected_parser.add_subparsers(
+        dest="protected_write_command", metavar="<subcommand>")
+
+    preview_parser = protected_subparsers.add_parser(
+        "preview",
+        help="Compute the exact diff, hashes and descriptor digest for a request",
+        description="Read a bounded JSON request, deterministically prepare the "
+            "before/after image of every path, and print the FULL untrusted diff "
+            "plus the descriptor digest a human must confirm. Nothing is written "
+            "and no grant is created.")
+    preview_parser.add_argument(
+        "--request", required=True,
+        help="Request file, or '-' for stdin: {\"tool\": ..., \"arguments\": {...}}")
+    preview_parser.add_argument(
+        "--root", help="Worktree to resolve paths against (default: current directory)")
+    add_json_flag(preview_parser, "Emit machine-readable JSON instead of human-readable text")
+    preview_parser.set_defaults(func=cmd_approvals)
+
+    status_parser = protected_subparsers.add_parser(
+        "status",
+        help="Read-only local authority status for this worktree",
+        description="Ask the local broker for the read-only status of this worktree "
+            "(unregistered / registered / held). An unreachable broker is reported "
+            "as unavailable and never as unregistered.")
+    status_parser.add_argument(
+        "--root", help="Worktree to resolve the identity against (default: current directory)")
+    status_parser.add_argument(
+        "--socket-dir", dest="socket_dir", default="/run/hermes-protected-writes",
+        help="Broker socket directory (default: /run/hermes-protected-writes)")
+    add_json_flag(status_parser, "Emit machine-readable JSON instead of human-readable text")
+    status_parser.set_defaults(func=cmd_approvals)
+
+    protected_parser.set_defaults(func=cmd_approvals)
