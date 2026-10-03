@@ -406,6 +406,101 @@ Do not ask the agent to `patch` `~/.hermes/cron/jobs.json` directly. Use the `cr
 Write guards apply to `write_file` and `patch` only, with one exception: the Windows NT/device-namespace row is also enforced on reads — `read_file`, `search_files`, `@file:`/`@folder:` context references and the ACP file bridge all refuse those paths on the raw string, before anything resolves them. The `terminal` tool runs as the same OS user and can still `cat` or overwrite denied paths via shell commands. The denylist reduces accidental damage and gives models a clear stop signal; it does not sandbox a hostile or compromised agent.
 :::
 
+## Protected-Write Consent {#protected-write-consent}
+
+The sections above stop the agent *by accident*. Protected-write consent is the
+opposite direction: a root broker hands the agent one **single-use, human-issued
+authorization** for one exact file-tool operation, and the agent spends it once.
+
+**What it is, and what it is not.** This is *supported file-tool authorization*:
+the consent applies to the `write_file` and `patch` tools, which route through
+the mechanism. It is **not** confinement of arbitrary same-uid shell or Python,
+`ptrace`, or a compromised runtime — code that can run as your user can already
+write repository files. Treat it as a durable, auditable human gate on the file
+tools, not as a sandbox.
+
+### The two sockets
+
+A root-owned broker serves two Unix sockets under `/run/hermes-protected-writes`:
+
+| Socket | Mode | Who may talk to it |
+|--------|------|--------------------|
+| `admin.sock` | `0600`, root | `SO_PEERCRED` `uid == 0` only. Registers a run, issues, revokes and settles grants. The JSON body never authenticates anything. |
+| `consume.sock` | `0666`, root | The registered worker. The kernel reports the peer, and the broker requires **PID EQUAL to the registered worker PID** with matching uid, boot id and start ticks. There is no descendant allowance and no bearer-token or environment fallback, because a copied environment is trivially forgeable. |
+
+The socket directory is root-owned and not writable by group or other, so no
+unprivileged process can replace or shadow a socket in it. Any local uid may
+*connect* to `consume.sock`; the kernel credential check, not the file mode, is
+what authenticates the peer.
+
+The authority lives in a root-owned SQLite store
+(`/var/lib/hermes-protected-writes/authority.sqlite3`, `0700` parent / `0600`
+file). Every mutation runs in one `BEGIN IMMEDIATE` transaction with
+`synchronous=FULL`, so a returned receipt is durable before any mutation may
+follow it.
+
+### Preview and status (unprivileged)
+
+Ordinary sessions get a preview and a read-only status view, and nothing else:
+
+```bash
+# Show the full diff, the descriptor hashes and the digest to confirm.
+hermes approvals protected-write preview --request request.json
+hermes approvals protected-write preview --request - --json   # bounded JSON on stdin
+
+# Is this worktree registered, and are any holds outstanding?
+hermes approvals protected-write status
+hermes approvals protected-write status --socket-dir /run/hermes-protected-writes --json
+```
+
+There is deliberately **no** `--yes`, `--always`, `--grant` or session-wide
+flag: issuance is a separate root action outside the agent session. The preview
+prints the complete diff (never truncated) under a banner that labels the
+content as request data, escapes terminal control characters, and ends with the
+exact descriptor digest the human must confirm. An unreachable broker reports
+`unavailable` and exit code 3 — never `unregistered`, because the weaker answer
+would invite an unprotected fallback.
+
+### The immutable root bundle
+
+The broker must run from code no worker can write. `scripts/protected_write_bundle.py`
+builds, verifies and installs that bundle:
+
+```bash
+# Build an artifact (hash-pinned by its own manifest) and install the launcher.
+python scripts/protected_write_bundle.py --prefix / build --source .
+python scripts/protected_write_bundle.py --prefix / verify --owner 0
+python scripts/protected_write_bundle.py --prefix / artifact-id
+```
+
+`build` writes `<prefix>/opt/hermes-protected-writes/<artifact-sha256>/` plus the
+launcher `<prefix>/usr/local/libexec/hermes-protected-write-admin`. `verify`
+fails closed on a hash mismatch, a symlink, a hard link, a foreign owner, or a
+group/other-writable ancestor. The launcher runs the bundle with an isolated
+interpreter (`-I -S`, fixed cwd, bundle-only import root) and the broker verifies
+its own hash pin before it opens a socket. The human issues grants through that
+launcher, reading the bounded request from **stdin** — a root process is never
+asked to open a request-supplied file path:
+
+```bash
+sudo /usr/local/libexec/hermes-protected-write-admin --request - <<'JSON'
+{"method": "register", "params": {"context": {...}, "dispatcher_pid": 12345}}
+JSON
+```
+
+A registered worker is refused before preparation when the run is a delegated
+child or a cron/in-process run that does not own the dispatcher's card. Consent
+also survives crashes conservatively: an unresolved claim is **recovery-only**
+after a broker restart, a duplicate claim may read the prior receipt but never
+execute again, and every post-claim failure spends the consent, so a fresh
+human decision is required for the new state.
+
+### Status of this mechanism
+
+This page documents the mechanism itself. Enabling it for real file tools is a
+separate, human-authorized activation step; until that step runs, ordinary
+`write_file`/`patch` behavior is unchanged.
+
 ## User Authorization (Gateway)
 
 When running the messaging gateway, Hermes controls who can interact with the bot through a layered authorization system.

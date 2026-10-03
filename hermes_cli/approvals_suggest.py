@@ -374,6 +374,9 @@ def approvals_command(args) -> int:
     if sub == "test":
         from hermes_cli.approvals_test import approvals_test_command
         return approvals_test_command(args)
+    if sub == "protected-write":
+        from hermes_cli.approvals_protected_write import protected_write_command
+        return protected_write_command(args)
     print(
         "usage: hermes approvals <subcommand>\n"
         "\n"
@@ -382,6 +385,9 @@ def approvals_command(args) -> int:
         "             command_allowlist (dry by default; --apply N,M to merge)\n"
         "  test       Dry-run the approval verdict for a command without\n"
         "             executing it (exit 0 allow / 2 ask / 3 deny)\n"
+        "  protected-write\n"
+        "             Preview one file-tool write (full diff + descriptor\n"
+        "             digest) and read local authority status. Never issues.\n"
         "\n"
         "Run `hermes approvals <subcommand> -h` for details."
     )

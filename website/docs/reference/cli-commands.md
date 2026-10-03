@@ -75,7 +75,7 @@ The install also ships `hermes-agent`, a minimal runner that sends one query and
 | `hermes hooks` | Inspect, approve, or remove shell-script hooks declared in `config.yaml`. |
 | `hermes doctor` | Diagnose config and dependency issues. |
 | `hermes security audit` | On-demand supply-chain audit (OSV.dev) for the venv, plugin requirements, and pinned MCP servers. |
-| `hermes approvals` | Approval-prompt tools — mine approval history into allowlist proposals. |
+| `hermes approvals` | Approval-prompt tools — mine approval history into allowlist proposals; `protected-write preview`/`status` preview one protected-write request and read consent status (never issues a grant). See [Protected-Write Consent](../user-guide/security.md#protected-write-consent). |
 | `hermes dump` | Copy-pasteable setup summary for support/debugging. |
 | `hermes prompt-size` | Show a byte breakdown of the system prompt + tool schemas (skills index, memory, profile). Runs offline. |
 | `hermes debug` | Debug tools — upload logs and system info for support. |
