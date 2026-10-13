@@ -12,7 +12,7 @@ from hermes_cli.kanban_db_connect import connect
 
 
 @pytest.fixture
-def github(tmp_path, monkeypatch):
+def github(tmp_path, monkeypatch, *, db_path=None):
     state = {"conclusion": "success", "head": "a" * 40, "reads": 0, "requests": []}
 
     class Handler(BaseHTTPRequestHandler):
@@ -82,7 +82,7 @@ def github(tmp_path, monkeypatch):
     gh.chmod(0o755)
     monkeypatch.setenv("PATH", str(shim) + os.pathsep + os.environ["PATH"])
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
-    kb.init_db()
+    kb.init_db(db_path=db_path)
     try:
         yield state
     finally:
@@ -108,6 +108,20 @@ def test_pr_completion_requires_current_required_evidence(github):
                 assert task.status in {"running", "ready", "blocked", "review"}
                 assert "retry" in receipts[-1]["recovery"]
                 assert receipts[-1]["checks"][0]["id"] == 42
+        for policy, classification in (
+            ({"responses": {"rules": [[], [{"type": "required_status_checks", "parameters": {"required_status_checks": [{"context": "required", "integration_id": 1}]}}]]}}, "success"),
+            ({"base": {"branchProtectionRule": None}, "responses": {"rules": [[{"type": "required_status_checks", "parameters": {"required_status_checks": [{"context": "required", "integration_id": 9}]}}]]}}, "missing"),
+            ({"base": {"branchProtectionRule": {"requiredStatusChecks": [{"context": "legacy"}]}}, "responses": {"statuses": [[{"id": 8, "context": "legacy", "state": "failure"}], [{"id": 9, "context": "legacy", "state": "success"}]]}}, "success"),
+            ({"responses": {"check-runs": [{"total_count": 2, "check_runs": []}]}}, "infra"),
+        ):
+            github.update(conclusion="success")
+            github.update(policy)
+            tid = kb.create_task(conn, title="policy union", completion_contract="acme/repo")
+            assert kb.complete_task(conn, tid, summary="evidence", metadata={"published_pr": "https://github.com/acme/repo/pull/7"}) is (classification == "success")
+            receipt = json.loads(conn.execute("SELECT payload FROM task_events WHERE task_id=? AND kind='pr_acceptance'", (tid,)).fetchone()[0])
+            assert receipt["classification"] == classification
+            for key in policy:
+                github.pop(key)
         for fault in ("missing", "stale", "head_change"):
             github.update(conclusion="success", head="a" * 40)
             github[fault] = True
@@ -128,7 +142,7 @@ def test_pr_completion_requires_current_required_evidence(github):
 @pytest.mark.platforms("linux")
 def test_acceptance_receipts_and_terminal_write_share_run_ownership(github):
     with connect() as conn:
-        for conclusion in ("success", "failure"):
+        for conclusion in ("success", "failure", "absent"):
             tid = kb.create_task(conn, title="race", completion_contract="acme/repo")
             owner = kb.claim_task(conn, tid)
             run_id = owner.current_run_id
@@ -137,14 +151,19 @@ def test_acceptance_receipts_and_terminal_write_share_run_ownership(github):
                     assert kb.block_task(rival, tid, reason="Reassigned during acceptance")
                     assert kb.unblock_task(rival, tid)
                     github["replacement"] = kb.claim_task(rival, tid).current_run_id
-            github.update(conclusion=conclusion, race=reclaim)
+            if conclusion == "absent":
+                github.update(base={"branchProtectionRule": None}, final_race=reclaim)
+            else:
+                github.update(conclusion=conclusion, race=reclaim)
             assert not kb.complete_task(conn, tid, result="done", expected_run_id=run_id,
                 metadata={"published_pr": "https://github.com/acme/repo/pull/7"})
             assert kb.get_task(conn, tid).current_run_id == github["replacement"]
             assert github["replacement"] != run_id
             assert kb.get_task(conn, tid).status != "done"
             assert conn.execute("SELECT count(*) FROM task_events WHERE task_id=? AND kind='pr_acceptance'", (tid,)).fetchone()[0] == 0
-            github.pop("race")
+            github.pop("race", None)
+            github.pop("final_race", None)
+            github.pop("base", None)
 
 
 

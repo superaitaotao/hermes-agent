@@ -131,52 +131,25 @@ def collect_acceptance(contract: str, published_pr: str | None,
         receipt["head_sha"] = sha
         if not re.fullmatch(r"[0-9a-f]{40}", sha) or pr["state"] not in {"OPEN", "MERGED"}:
             raise ValueError("PR is closed or current head is unavailable")
-        protection = (pr.get("baseRef") or {}).get("branchProtectionRule") or {}
-        required = {(r["context"], (r.get("app") or {}).get("databaseId")) for r in protection.get("requiredStatusChecks", [])}
+        if not isinstance(branch, str) or not branch:
+            raise ValueError("PR base branch unavailable")
+        receipt["base_ref"] = branch
+        required = _classic_requirements(pr["baseRef"])
         rules = _api(f"repos/{repo}/rules/branches/{quote(branch, safe='')}?per_page=100",
                      paginate=True, profile_home=profile_home)
-        for page in rules:
-            for rule in page:
-                if rule["type"] == "required_status_checks":
-                    required.update((r["context"], r.get("integration_id"))
-                                    for r in rule["parameters"]["required_status_checks"])
+        required.update(_rules_requirements(rules))
         receipt["required"] = [{"context": c, "app_id": a} for c, a in sorted(required, key=str)]
-        if not required:
-            receipt["detail"] = "No repository-required checks are configured; explicitly use a local-only contract for non-CI tasks."
-            return receipt
-        pages = _api(f"repos/{repo}/commits/{sha}/check-runs?per_page=100&filter=latest",
-                     paginate=True, profile_home=profile_home)
-        runs = [run for page in pages for run in page["check_runs"]]
-        if len({r["id"] for r in runs}) != pages[0]["total_count"]:
-            raise ValueError("Incomplete check-run pagination")
-        statuses = [{**s, "sha": sha} for page in _api(f"repos/{repo}/commits/{sha}/statuses?per_page=100",
-                                                       paginate=True, profile_home=profile_home) for s in page]
-        outcomes = []
-        for context, app_id in sorted(required, key=str):
-            matching = [r for r in runs if r["name"] == context and
-                        (app_id in (None, -1) or r["app"]["id"] == app_id)]
-            # A legacy status can satisfy an unpinned context, but never a check pinned to an app.
-            legacy = [s for s in statuses if s["context"] == context] if app_id in (None, -1) else []
-            selected = matching + ([max(legacy, key=lambda s: s["id"])] if legacy else [])
-            if not selected:
-                outcomes.append("missing")
-                receipt["checks"].append({"name": context, "classification": "missing", "head_sha": sha})
-            for check in selected:
-                is_run = "conclusion" in check
-                outcome = check.get("conclusion") if is_run else check["state"]
-                classification = _classify(check, sha, outcome, is_run)
-                outcomes.append(classification)
-                receipt["checks"].append({"name": context, "id": check["id"],
-                    "url": check.get("html_url") or check.get("target_url"),
-                    "head_sha": check.get("head_sha", check.get("sha")),
-                    "classification": classification, "conclusion": outcome})
-        # Re-read after all pages: old-head successes are never transferable.
+        outcomes = _required_outcomes(repo, sha, required, receipt, profile_home) if required else []
         current = _api(f"repos/{repo}/pulls/{number}", profile_home=profile_home)
-        if current["head"]["sha"] != sha or current["base"]["ref"] != branch or (current["state"] == "closed" and not current.get("merged")):
+        if not _same_pr_identity(current, sha, branch):
             receipt.update(classification="stale", detail="PR head/base changed while collecting evidence; retry.")
             return receipt
-        receipt["classification"] = next((x for x in outcomes if x != "success"), "missing" if not outcomes else "success")
-        receipt["ok"] = receipt["classification"] == "success"
+        if not required:
+            receipt.update(ok=True, classification="not_applicable", recovery="",
+                           detail="No repository-required CI checks are configured; CI is not applicable. Review and merge gates remain separate.")
+        else:
+            receipt["classification"] = next((x for x in outcomes if x != "success"), "missing" if not outcomes else "success")
+            receipt["ok"] = receipt["classification"] == "success"
         return receipt
     except _GateAuthError as exc:
         login = f"assignee profile {assignee!r}'s gh login" if assignee else "the ambient gh login"
@@ -185,9 +158,99 @@ def collect_acceptance(contract: str, published_pr: str | None,
                               "fix that profile's GitHub credentials/access to the repository, then retry completion.")
         return receipt
     except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError, IndexError):
-        # Never persist gh stderr (credentials/host details); the failed phase is actionable.
         receipt.update(classification="infra", detail="GitHub acceptance evidence unavailable or incomplete; check gh authentication/API access and retry.")
         return receipt
+
+
+def _required_outcomes(repo, sha, required, receipt, profile_home):
+    pages = _api(f"repos/{repo}/commits/{sha}/check-runs?per_page=100&filter=latest",
+                 paginate=True, profile_home=profile_home)
+    runs = [run for page in pages for run in page["check_runs"]]
+    if len({r["id"] for r in runs}) != pages[0]["total_count"]:
+        raise ValueError("Incomplete check-run pagination")
+    statuses = [{**s, "sha": sha} for page in _api(f"repos/{repo}/commits/{sha}/statuses?per_page=100",
+                                                   paginate=True, profile_home=profile_home) for s in page]
+    outcomes = []
+    for context, app_id in sorted(required, key=str):
+        matching = [r for r in runs if r["name"] == context and
+                    (app_id in (None, -1) or r["app"]["id"] == app_id)]
+        # A legacy status can satisfy an unpinned context, but never a check pinned to an app.
+        legacy = [s for s in statuses if s["context"] == context] if app_id in (None, -1) else []
+        selected = matching + ([max(legacy, key=lambda s: s["id"])] if legacy else [])
+        if not selected:
+            outcomes.append("missing")
+            receipt["checks"].append({"name": context, "classification": "missing", "head_sha": sha})
+        for check in selected:
+            is_run = "conclusion" in check
+            outcome = check.get("conclusion") if is_run else check["state"]
+            classification = _classify(check, sha, outcome, is_run)
+            outcomes.append(classification)
+            receipt["checks"].append({"name": context, "id": check["id"],
+                "url": check.get("html_url") or check.get("target_url"),
+                "head_sha": check.get("head_sha", check.get("sha")),
+                "classification": classification, "conclusion": outcome})
+    return outcomes
+
+
+def _requirement_rows(rows, *, classic=False):
+    if not isinstance(rows, list):
+        raise ValueError("Required checks must be a list")
+    required = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            raise ValueError("Required check row unavailable")
+        context = row["context"]
+        if not isinstance(context, str) or not context.strip():
+            raise ValueError("Required check context unavailable")
+        app = row.get("app") if classic else None
+        if app is not None and not isinstance(app, dict):
+            raise ValueError("Required check app unavailable")
+        app_id = (app["databaseId"] if app is not None else None) if classic else row.get("integration_id")
+        if app is not None and app_id is None:
+            raise ValueError("Required check app identity unavailable")
+        if app_id is not None and (type(app_id) is not int or app_id < -1):
+            raise ValueError("Required check app identity unavailable")
+        required.add((context, app_id))
+    return required
+
+
+def _classic_requirements(base):
+    if not isinstance(base, dict):
+        raise ValueError("Base branch unavailable")
+    protection = base["branchProtectionRule"]
+    if protection is None:
+        return set()
+    if not isinstance(protection, dict):
+        raise ValueError("Branch protection unavailable")
+    return _requirement_rows(protection["requiredStatusChecks"], classic=True)
+
+
+def _rules_requirements(pages):
+    if not isinstance(pages, list) or not pages:
+        raise ValueError("Incomplete rules pagination")
+    required = set()
+    for page in pages:
+        if not isinstance(page, list):
+            raise ValueError("Incomplete rules page")
+        for rule in page:
+            if not isinstance(rule, dict):
+                raise ValueError("Rule unavailable")
+            if not isinstance(rule["type"], str) or not rule["type"]:
+                raise ValueError("Rule type unavailable")
+            if rule["type"] == "required_status_checks":
+                required.update(_requirement_rows(rule["parameters"]["required_status_checks"]))
+    return required
+
+
+def _same_pr_identity(current, sha, branch):
+    head, base, state = current["head"]["sha"], current["base"]["ref"], current["state"]
+    if not isinstance(head, str) or not re.fullmatch(r"[0-9a-f]{40}", head):
+        raise ValueError("Current PR head unavailable")
+    if not isinstance(base, str) or not base or state not in {"open", "closed"}:
+        raise ValueError("Current PR base/state unavailable")
+    if state == "closed" and type(current["merged"]) is not bool:
+        raise ValueError("Current PR merge state unavailable")
+    return head == sha and base == branch and (state == "open" or current["merged"])
 
 
 def _classify(check: dict, sha: str, outcome: str | None, is_run: bool) -> str:
