@@ -51,7 +51,11 @@ def test_repository_native_pr_execution_contract(repository, fork):
         step = _step(os_job, "Run ${{ matrix.marker }} tests")
         workers = gha.to_string(gha.render(step["env"]["HERMES_TEST_WORKERS"], cell))
         resolved.append((runner, workers, gha.render(step["env"]["HERMES_TEST_SLICE"], cell)))
+        guard = _step(os_job, "Require native Windows test interpreter")
+        assert gha.condition(guard["if"], cell) == (fork and row["marker"] == "windows")
         if row["marker"] == "windows":
+            assert gha.render(guard["env"]["EXPECTED_RUNNER_ARCH"], cell) == arch
+            assert os_job["steps"].index(guard) < os_job["steps"].index(step)
             assert gha.render(os_job["timeout-minutes"], cell) == (60 if arch == "ARM64" else 30)
             windows_selection.append(workflow_steps.selected_files(step, cell, _REPO))
     assert resolved == [
@@ -72,8 +76,14 @@ def test_repository_native_pr_execution_contract(repository, fork):
         "node .github/scripts/run-workspace-checks.mjs --concurrency 1" if fork
         else "node .github/scripts/run-workspace-checks.mjs")
     cargo = _step(rust, "cargo test")
-    assert cargo["run"] == "cargo test --lib"
-    assert gha.to_string(gha.render(cargo.get("env", {}).get("CARGO_BUILD_JOBS", ""), ctx)) == (
-        "2" if fork else "")
-    assert gha.render(_step(nix, "nix flake check").get("env", {}).get("NIX_BUILD_FLAGS", ""), ctx) == (
-        "--max-jobs 1 --cores 2" if fork else "")
+    assert gha.render(cargo["run"], ctx) == (
+        "CARGO_BUILD_JOBS=2 cargo test --lib" if fork else "cargo test --lib")
+    assert gha.render(_step(nix, "nix flake check")["run"], ctx) == (
+        'nix flake check "." --print-build-logs --max-jobs 1 --cores 2' if fork
+        else 'nix flake check "." --print-build-logs')
+    release_ctx = {**ctx, "inputs": {"release": True},
+                   "runner": {"temp": "/release-trial"},
+                   "github": {"repository": repository, "sha": "a" * 40}}
+    assert gha.render(nix["runs-on"], release_ctx) == "ubuntu-latest-32-core"
+    assert gha.render(_step(nix, "nix flake check")["run"], release_ctx) == (
+        'nix flake check "path:/release-trial/release-source?rev=' + "a" * 40 + '" --print-build-logs')
