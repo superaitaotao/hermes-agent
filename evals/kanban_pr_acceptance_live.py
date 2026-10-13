@@ -69,7 +69,7 @@ def _isolated(options):
     spec.loader.exec_module(fixture)
     marker = os.environ.get("HERMES_DELEGATED_CHILD_CONTEXT")
     reports = []
-    with tempfile.TemporaryDirectory(prefix="hermes-acceptance-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="hermes-acceptance-", dir=fixture_root) as temporary:
         temporary = Path(temporary)
         db = _safe_db(temporary / "board/kanban.db", temporary)
         with pytest.MonkeyPatch.context() as patch:
