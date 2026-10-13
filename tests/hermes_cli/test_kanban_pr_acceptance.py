@@ -47,9 +47,24 @@ def github(tmp_path, monkeypatch):
             else:
                 self.send_error(404)
                 return
-            self.send_response(200)
+            if self.path == "/graphql":
+                pr = value["data"]["repository"]["pullRequest"]
+                pr["state"] = state.get("pr_state", "OPEN")
+                if "base" in state:
+                    pr["baseRef"] = state["base"]
+                if state.get("omit_base"):
+                    del pr["baseRef"]
+            if "/pulls/" in self.path:
+                if state.get("final_race"):
+                    state["final_race"]()
+                value = state.get("final", value)
+            key = next((k for k in ("graphql", "rules", "check-runs", "statuses") if k in self.path), "final")
+            value = state.get("responses", {}).get(key, value)
+            code = state.get("http_errors", {}).get(key, 200)
+            self.send_response(code)
             self.end_headers()
-            self.wfile.write(json.dumps(value).encode())
+            body = state.get("raw", {}).get(key, json.dumps(value))
+            self.wfile.write(body.encode())
 
         def log_message(self, *args):
             pass
@@ -62,7 +77,8 @@ def github(tmp_path, monkeypatch):
     gh = shim / "gh"
     gh.write_text(f"#!{sys.executable}\nimport sys,urllib.request\n"
                   f"u='http://127.0.0.1:{server.server_port}/'+sys.argv[2]\n"
-                  "print(urllib.request.urlopen(u).read().decode())\n")
+                  "try:\n print(urllib.request.urlopen(u).read().decode())\n"
+                  "except urllib.error.HTTPError as e:\n print('HTTP '+str(e.code), file=sys.stderr); sys.exit(1)\n")
     gh.chmod(0o755)
     monkeypatch.setenv("PATH", str(shim) + os.pathsep + os.environ["PATH"])
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
@@ -129,6 +145,96 @@ def test_acceptance_receipts_and_terminal_write_share_run_ownership(github):
             assert kb.get_task(conn, tid).status != "done"
             assert conn.execute("SELECT count(*) FROM task_events WHERE task_id=? AND kind='pr_acceptance'", (tid,)).fetchone()[0] == 0
             github.pop("race")
+
+
+
+
+@pytest.mark.platforms("linux")
+@pytest.mark.parametrize("pr_state", ["OPEN", "MERGED"])
+@pytest.mark.parametrize("base,rules", [
+    ({"branchProtectionRule": None}, [[]]),
+    ({"branchProtectionRule": {"requiredStatusChecks": []}}, [[]]),
+    ({"branchProtectionRule": None}, [[{"type": "pull_request"}], []]),
+])
+def test_absent_required_ci_completes_with_not_applicable_receipt(github, pr_state, base, rules):
+    url = "https://github.com/acme/repo/pull/7"
+    metadata = {"published_pr": url, "finding": "preserve caller"}
+    github.update(base=base, pr_state=pr_state, responses={"rules": rules},
+                  final={"head": {"sha": "a" * 40}, "base": {"ref": "main"},
+                         "state": "open" if pr_state == "OPEN" else "closed", "merged": pr_state == "MERGED"})
+    with connect() as conn:
+        tid = kb.create_task(conn, title="Absent CI", completion_contract="acme/repo")
+        owner = kb.claim_task(conn, tid)
+        github["http_errors"] = {"rules": 503}
+        assert kb.complete_task(conn, tid, summary="attempt", metadata=metadata,
+                                expected_run_id=owner.current_run_id) is False
+        github["http_errors"] = {}
+        assert kb.complete_task(conn, tid, summary="delivered", metadata=metadata,
+                                expected_run_id=owner.current_run_id) is True
+        task = kb.get_task(conn, tid)
+        assert (task.status, task.completion_contract, task.current_run_id) == ("done", url, None)
+        receipts = [json.loads(r["payload"]) for r in conn.execute(
+            "SELECT payload FROM task_events WHERE task_id=? AND kind='pr_acceptance' ORDER BY id", (tid,))]
+        assert receipts[0]["classification"] == "infra"
+        assert receipts[0]["ok"] is False
+        assert receipts[1] == {
+            "ok": True, "classification": "not_applicable", "head_sha": "a" * 40,
+            "base_ref": "main", "pr_url": url, "required": [], "checks": [],
+            "detail": "No repository-required CI checks are configured; CI is not applicable. Review and merge gates remain separate.",
+            "recovery": "",
+        }
+        run = conn.execute("SELECT status, outcome, metadata FROM task_runs WHERE id=?", (owner.current_run_id,)).fetchone()
+        assert (run["status"], run["outcome"]) == ("done", "completed")
+        assert json.loads(run["metadata"])["published_pr"] == url
+        assert conn.execute("SELECT count(*) FROM task_events WHERE task_id=? AND kind='completed'", (tid,)).fetchone()[0] == 1
+    assert metadata == {"published_pr": url, "finding": "preserve caller"}
+
+
+@pytest.mark.platforms("linux")
+@pytest.mark.parametrize("fault,classification", [
+    ({"omit_base": True}, "infra"),
+    ({"base": None}, "infra"),
+    ({"base": {}}, "infra"),
+    ({"base": {"branchProtectionRule": {}}}, "infra"),
+    ({"base": {"branchProtectionRule": {"requiredStatusChecks": None}}}, "infra"),
+    ({"base": {"branchProtectionRule": {"requiredStatusChecks": "bad"}}}, "infra"),
+    ({"base": {"branchProtectionRule": {"requiredStatusChecks": [{"context": ""}]}}}, "infra"),
+    ({"base": {"branchProtectionRule": {"requiredStatusChecks": [{"context": 7}]}}}, "infra"),
+    ({"base": {"branchProtectionRule": {"requiredStatusChecks": [{"context": "ci", "app": {}}]}}}, "infra"),
+    ({"base": {"branchProtectionRule": {"requiredStatusChecks": [{"context": "ci", "app": {"databaseId": "bad"}}]}}}, "infra"),
+    ({"responses": {"rules": []}}, "infra"),
+    ({"responses": {"rules": None}}, "infra"),
+    ({"responses": {"rules": [{}]}}, "infra"),
+    ({"responses": {"rules": [[], None]}}, "infra"),
+    ({"responses": {"rules": [[{"type": "required_status_checks"}]]}}, "infra"),
+    ({"responses": {"rules": [[{"type": "required_status_checks", "parameters": {"required_status_checks": [{"context": "ci", "integration_id": False}]}}]]}}, "infra"),
+    ({"responses": {"rules": [[], [{"type": "required_status_checks", "parameters": {"required_status_checks": [{"context": "later"}]}}]]}}, "missing"),
+    ({"responses": {"graphql": {"data": {"repository": None}}}}, "auth"),
+    ({"responses": {"graphql": {"errors": [{"message": "partial"}], "data": {"repository": None}}}}, "infra"),
+    ({"http_errors": {"rules": 401}}, "auth"),
+    ({"http_errors": {"rules": 403}}, "auth"),
+    ({"http_errors": {"rules": 404}}, "auth"),
+    ({"http_errors": {"rules": 503}}, "infra"),
+    ({"raw": {"rules": "not json"}}, "infra"),
+    ({"final": {"head": {"sha": "b" * 40}, "base": {"ref": "main"}, "state": "open"}}, "stale"),
+    ({"final": {"head": {"sha": "a" * 40}, "base": {"ref": "other"}, "state": "open"}}, "stale"),
+    ({"final": {"head": {"sha": "a" * 40}, "base": {"ref": "main"}, "state": "closed", "merged": False}}, "stale"),
+    ({"final": {"head": {"sha": "a" * 40}, "base": {"ref": "main"}, "state": "invalid"}}, "infra"),
+    ({"final": {}}, "infra"),
+])
+def test_requirements_discovery_refuses_unavailable_or_changed_identity(github, fault, classification):
+    github.update(base={"branchProtectionRule": None})
+    github.update(fault)
+    with connect() as conn:
+        tid = kb.create_task(conn, title="Unavailable discovery", completion_contract="acme/repo")
+        owner = kb.claim_task(conn, tid)
+        assert kb.complete_task(conn, tid, summary="attempt", expected_run_id=owner.current_run_id,
+                                metadata={"published_pr": "https://github.com/acme/repo/pull/7"}) is False
+        receipt = json.loads(conn.execute(
+            "SELECT payload FROM task_events WHERE task_id=? AND kind='pr_acceptance'", (tid,)).fetchone()[0])
+        assert (receipt["ok"], receipt["classification"]) == (False, classification)
+        assert kb.get_task(conn, tid).status == "running"
+        assert kb.get_task(conn, tid).current_run_id == owner.current_run_id
 
 
 # --- #122689: acceptance must read the repo as the ASSIGNEE profile's gh login ---
