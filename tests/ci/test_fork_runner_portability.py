@@ -33,6 +33,7 @@ def test_repository_native_pr_execution_contract(repository, fork):
         cell = {**ctx, "matrix": {"slice": slice_number}}
         assert gha.render(linux["runs-on"], cell) == (
             "ubuntu-latest" if fork else "ubuntu-latest-32-core")
+        assert gha.render(linux["timeout-minutes"], cell) == (90 if fork else 30)
         env = _step(linux, "Run tests")["env"]
         assert gha.to_string(gha.render(env["HERMES_TEST_WORKERS"], cell)) == ("2" if fork else "32")
         assert gha.render(env["HERMES_TEST_SLICE"], cell) == f"{slice_number}/2"
@@ -53,10 +54,11 @@ def test_repository_native_pr_execution_contract(repository, fork):
         resolved.append((runner, workers, gha.render(step["env"]["HERMES_TEST_SLICE"], cell)))
         guard = _step(os_job, "Require native Windows test interpreter")
         assert gha.condition(guard["if"], cell) == (fork and row["marker"] == "windows")
+        assert gha.render(os_job["timeout-minutes"], cell) == (
+            60 if arch == "ARM64" or (fork and row["marker"] == "windows") else 30)
         if row["marker"] == "windows":
             assert gha.render(guard["env"]["EXPECTED_RUNNER_ARCH"], cell) == arch
             assert os_job["steps"].index(guard) < os_job["steps"].index(step)
-            assert gha.render(os_job["timeout-minutes"], cell) == (60 if arch == "ARM64" else 30)
             windows_selection.append(workflow_steps.selected_files(step, cell, _REPO))
     assert resolved == [
         ("macos-latest", "", "1/2"), ("macos-latest", "", "2/2"),
