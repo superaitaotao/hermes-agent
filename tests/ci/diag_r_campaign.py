@@ -16,7 +16,7 @@ FILES = {
 
 def run_case(paths, workers, output, pytest_args=()):
     output.mkdir(parents=True, exist_ok=True)
-    command = ['bash', 'scripts/run_tests.sh', *paths, '-j', str(workers), '--',
+    command = [os.environ['DIAG_BASH'], 'scripts/run_tests.sh', *paths, '-j', str(workers), '--',
                '-m', 'platforms and not integration', '-v', '--tb=long',
                '-o', 'faulthandler_timeout=100', '-p', 'tests.ci.diag_r_windows',
                '--diag-output', str(output), *pytest_args]

@@ -1,7 +1,7 @@
 name: R Windows v3 owner diagnosis
 on:
   push:
-    branches: ['diag/r-windows-v3/owners-1']
+    branches: ['diag/r-windows-v3/owners-2']
 permissions:
   contents: read
 jobs:
@@ -84,6 +84,7 @@ jobs:
       - name: Run native owner diagnosis
         shell: bash
         run: |
+          export DIAG_BASH="$(cygpath -w "$BASH")"
           "$HERMES_PYTHON" tests/ci/diag_r_campaign.py "${{ matrix.phase }}" --file "${{ matrix.file }}" --output "$RUNNER_TEMP/owner-diag"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
