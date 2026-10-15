@@ -1,7 +1,7 @@
 name: R Windows v3 fixture verification
 on:
   push:
-    branches: ['diag/r-windows-v3/fixtures-1']
+    branches: ['diag/r-windows-v3/timing-1']
 permissions:
   contents: read
 jobs:
@@ -16,9 +16,6 @@ jobs:
           - runner: windows-latest
             arch: X64
             phase: r6
-          - runner: windows-11-arm
-            arch: ARM64
-            phase: probe
     steps:
       - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a
       - name: Set up native ARM64 build dependencies

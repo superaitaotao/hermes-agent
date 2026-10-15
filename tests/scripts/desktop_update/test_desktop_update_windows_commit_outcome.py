@@ -84,6 +84,7 @@ def _handoff(tmp_path: Path, *args: str, verify: str = 'pass\n', timeout: int = 
     if prepare is not None:
         prepare(home, install)
     calls = tmp_path / 'calls.jsonl'
+    print('DIAG before handoff Popen', time.time(), flush=True)
     proc = subprocess.Popen(
         ['powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', str(SCRIPT),
          '-InstallRoot', str(install), '-NoUi', *args],
@@ -91,6 +92,7 @@ def _handoff(tmp_path: Path, *args: str, verify: str = 'pass\n', timeout: int = 
         env={**os.environ, 'HERMES_HOME': str(home), 'HERMES_RUNTIME_DIR': str(tmp_path / 'empty-store'),
              'HANDOFF_CALLS': str(calls), 'PYTHONIOENCODING': 'utf-8', **env},
     )
+    print('DIAG after handoff Popen', time.time(), proc.pid, flush=True)
     try:
         out, _ = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
@@ -160,6 +162,7 @@ fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT | os.O_BINARY, 0o644)
 os.lseek(fd, 1 << 20, os.SEEK_SET)
 msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)   # hermes_cli/update_lock.py::_try_lock's byte
 print('ready', flush=True)
+print('DIAG holder acquired', time.time(), file=sys.stderr, flush=True)
 time.sleep(float(sys.argv[2]))
 """
 
@@ -171,9 +174,11 @@ def test_result_finished_at_is_stamped_after_the_r6_release_wait(tmp_path: Path)
     holders = []
 
     def hold_checkout(_home: Path, install: Path) -> None:
+        print('DIAG before holder Popen', time.time(), flush=True)
         proc = subprocess.Popen([sys.executable, '-c', _TIMED_CHECKOUT_HOLDER,
                                  str(install / '.hermes-update.lock'), '25'],
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        print('DIAG after holder Popen', time.time(), proc.pid, flush=True)
         holders.append((proc, time.time() + 25))
         ready = queue.Queue()
         assert proc.stdout is not None
@@ -182,6 +187,7 @@ def test_result_finished_at_is_stamped_after_the_r6_release_wait(tmp_path: Path)
             line = ready.get(timeout=30)
         except queue.Empty:
             pytest.fail('checkout holder did not acquire its lock within 30s')
+        print('DIAG received holder ready', time.time(), line, flush=True)
         assert line == 'ready\n', f'checkout holder failed before acquiring its lock: {line}'
     try:
         code, out, _, result, home = _handoff(tmp_path, '-NoGateway', prepare=hold_checkout)
