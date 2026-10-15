@@ -1,0 +1,68 @@
+name: R Windows v3 baseline diagnosis
+on:
+  push:
+    branches: ['diag/r-windows-v3/baseline-1']
+permissions:
+  contents: read
+jobs:
+  baseline:
+    name: Baseline ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-latest
+            arch: X64
+          - runner: windows-11-arm
+            arch: ARM64
+    steps:
+      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a
+      - name: Set up native ARM64 build dependencies
+        if: runner.arch == 'ARM64'
+        uses: ./.github/actions/setup-windows-build-deps
+      - uses: ./.github/actions/setup-pm
+        with:
+          packages: git,ripgrep
+          extras: '["all", "telegram", "anthropic", "mistral", "fal", "modal", "daytona", "parallel-web"]'
+          test-environment: 'true'
+          prune-python-cache: true
+      - name: Native identity
+        shell: bash
+        env:
+          EXPECTED_ARCH: ${{ matrix.arch }}
+        run: |
+          "$HERMES_PYTHON" - <<'PY'
+          import json, os, platform, subprocess, sys
+          expected = os.environ['EXPECTED_ARCH']
+          print(json.dumps({'runner_os': os.environ['RUNNER_OS'], 'runner_arch': os.environ['RUNNER_ARCH'], 'machine': platform.machine(), 'interpreter': sys.executable, 'tested_sha': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(), 'cpus': os.cpu_count()}))
+          assert os.environ['RUNNER_OS'] == 'Windows'
+          assert os.environ['RUNNER_ARCH'] == expected
+          assert platform.machine().upper() in ({'ARM64', 'AARCH64'} if expected == 'ARM64' else {'AMD64', 'X86_64'})
+          PY
+      - name: Native baseline regression
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/diag-baseline"
+          set +e
+          if [ "$RUNNER_ARCH" = ARM64 ]; then
+            scripts/run_tests.sh tests/scripts/desktop_update/test_desktop_update_windows_commit_outcome.py -j 1 -- -m "platforms and not integration" -k test_hanging_update_help_probe_is_bounded -v --tb=long -o faulthandler_timeout=100 -p tests.ci.diag_r_windows --diag-output "$RUNNER_TEMP/diag-baseline" --junitxml "$RUNNER_TEMP/diag-baseline/results.xml" > "$RUNNER_TEMP/diag-baseline/runner.log" 2>&1
+          else
+            scripts/run_tests.sh tests/scripts/desktop_update/test_desktop_update_windows_commit_outcome.py tests/scripts/desktop_update/test_desktop_update_windows_cwd.py -j 2 -- -m "platforms and not integration" -v --tb=long -o faulthandler_timeout=100 -p tests.ci.diag_r_windows --diag-output "$RUNNER_TEMP/diag-baseline" > "$RUNNER_TEMP/diag-baseline/runner.log" 2>&1
+          fi
+          result=$?
+          printf '%s\n' "$result" > "$RUNNER_TEMP/diag-baseline/exit.txt"
+          cat "$RUNNER_TEMP/diag-baseline/runner.log"
+          exit "$result"
+      - name: Capture surviving native processes
+        if: always()
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force "$env:RUNNER_TEMP/diag-baseline" | Out-Null
+          Get-CimInstance Win32_Process | Where-Object { $_.Name -match '^(python|pythonw|powershell|pwsh).*' } | Select-Object ProcessId,ParentProcessId,Name,CreationDate,CommandLine | ConvertTo-Json -Depth 3 | Set-Content "$env:RUNNER_TEMP/diag-baseline/processes.json"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: baseline-${{ matrix.arch }}
+          path: ${{ runner.temp }}/diag-baseline
