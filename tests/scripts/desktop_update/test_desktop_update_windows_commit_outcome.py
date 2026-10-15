@@ -11,8 +11,10 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import queue
 import subprocess
 import sys
+import threading
 import time
 
 import pytest
@@ -154,9 +156,16 @@ def test_nonzero_exit_after_the_commit_point_is_installed_with_a_followup(tmp_pa
 
 _TIMED_CHECKOUT_HOLDER = """
 import msvcrt, os, sys, time
+from pathlib import Path
+from tests.waiting import wait_until
 fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT | os.O_BINARY, 0o644)
 os.lseek(fd, 1 << 20, os.SEEK_SET)
 msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)   # hermes_cli/update_lock.py::_try_lock's byte
+print('ready', flush=True)
+log = Path(sys.argv[3])
+wait_until(lambda: log.is_file() and 'hand-off start:' in log.read_text(encoding='utf-8-sig'),
+           timeout=120, what='hand-off startup before the checkout hold')
+print(time.time() + float(sys.argv[2]), flush=True)
 time.sleep(float(sys.argv[2]))
 """
 
@@ -167,11 +176,31 @@ def test_result_finished_at_is_stamped_after_the_r6_release_wait(tmp_path: Path)
     # R6 wait lasts up to 2 h. The result must carry the time the hand-off actually finished.
     holders = []
 
-    def hold_checkout(_home: Path, install: Path) -> None:
-        holders.append((subprocess.Popen([sys.executable, '-c', _TIMED_CHECKOUT_HOLDER,
-                                          str(install / '.hermes-update.lock'), '25']), time.time() + 25))
+    messages = queue.Queue()
+
+    def hold_checkout(home: Path, install: Path) -> None:
+        proc = subprocess.Popen([sys.executable, '-c', _TIMED_CHECKOUT_HOLDER,
+                                 str(install / '.hermes-update.lock'), '25',
+                                 str(home / 'logs/desktop-update-handoff.log')],
+                                cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        holders.append((proc, 0))
+        assert proc.stdout is not None
+        output = proc.stdout
+
+        def read_messages() -> None:
+            for line in output:
+                messages.put(line)
+
+        threading.Thread(target=read_messages, daemon=True).start()
+        try:
+            line = messages.get(timeout=30)
+        except queue.Empty:
+            pytest.fail('checkout holder did not acquire its lock within 30s')
+        assert line == 'ready\n', f'checkout holder failed before acquiring its lock: {line}'
+
     try:
         code, out, _, result, home = _handoff(tmp_path, '-NoGateway', prepare=hold_checkout)
+        holders[0] = (holders[0][0], float(messages.get(timeout=30)))
     finally:
         for proc, _ in holders:
             proc.kill(); proc.wait()
