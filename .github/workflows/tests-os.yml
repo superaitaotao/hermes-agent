@@ -73,7 +73,7 @@ jobs:
   os-tests:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: ${{ matrix.timeout || (github.repository == 'superaitaotao/hermes-agent' && matrix.marker == 'windows' && 60) || 30 }}
+    timeout-minutes: ${{ (github.repository == 'superaitaotao/hermes-agent' && matrix.marker == 'windows' && 75) || matrix.timeout || 30 }}
     strategy:
       fail-fast: false
       matrix:

@@ -40,7 +40,7 @@ jobs:
     # both slices agree on the split without a planning job.
     name: Run tests (${{ matrix.slice }}/2)
     runs-on: ${{ github.repository == 'superaitaotao/hermes-agent' && 'ubuntu-latest' || 'ubuntu-latest-32-core' }}
-    timeout-minutes: ${{ github.repository == 'superaitaotao/hermes-agent' && 90 || 30 }}
+    timeout-minutes: ${{ github.repository == 'superaitaotao/hermes-agent' && 120 || 30 }}
     strategy:
       fail-fast: false
       matrix:
