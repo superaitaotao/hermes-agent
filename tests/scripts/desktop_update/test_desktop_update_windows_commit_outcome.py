@@ -11,8 +11,10 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import queue
 import subprocess
 import sys
+import threading
 import time
 
 import pytest
@@ -157,6 +159,7 @@ import msvcrt, os, sys, time
 fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT | os.O_BINARY, 0o644)
 os.lseek(fd, 1 << 20, os.SEEK_SET)
 msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)   # hermes_cli/update_lock.py::_try_lock's byte
+print('ready', flush=True)
 time.sleep(float(sys.argv[2]))
 """
 
@@ -168,8 +171,18 @@ def test_result_finished_at_is_stamped_after_the_r6_release_wait(tmp_path: Path)
     holders = []
 
     def hold_checkout(_home: Path, install: Path) -> None:
-        holders.append((subprocess.Popen([sys.executable, '-c', _TIMED_CHECKOUT_HOLDER,
-                                          str(install / '.hermes-update.lock'), '25']), time.time() + 25))
+        proc = subprocess.Popen([sys.executable, '-c', _TIMED_CHECKOUT_HOLDER,
+                                 str(install / '.hermes-update.lock'), '25'],
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        holders.append((proc, time.time() + 25))
+        ready = queue.Queue()
+        assert proc.stdout is not None
+        threading.Thread(target=lambda: ready.put(proc.stdout.readline()), daemon=True).start()
+        try:
+            line = ready.get(timeout=30)
+        except queue.Empty:
+            pytest.fail('checkout holder did not acquire its lock within 30s')
+        assert line == 'ready\n', f'checkout holder failed before acquiring its lock: {line}'
     try:
         code, out, _, result, home = _handoff(tmp_path, '-NoGateway', prepare=hold_checkout)
     finally:
