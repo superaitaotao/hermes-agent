@@ -164,8 +164,8 @@ os.lseek(fd, 1 << 20, os.SEEK_SET)
 msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)   # hermes_cli/update_lock.py::_try_lock's byte
 print('ready', flush=True)
 home = Path(sys.argv[3])
-wait_until(lambda: 'hand-off start:' in _log(home),
-           timeout=120, what='hand-off startup before the checkout hold')
+wait_until(lambda: 'hermes update exit code: 0' in _log(home),
+           timeout=120, what='update completion before the checkout hold')
 print(time.time() + float(sys.argv[2]), flush=True)
 time.sleep(float(sys.argv[2]))
 """
