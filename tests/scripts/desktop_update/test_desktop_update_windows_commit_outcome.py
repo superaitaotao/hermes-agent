@@ -157,6 +157,7 @@ def test_nonzero_exit_after_the_commit_point_is_installed_with_a_followup(tmp_pa
 _TIMED_CHECKOUT_HOLDER = """
 import msvcrt, os, sys, time
 from pathlib import Path
+sys.path.insert(0, sys.argv[4])
 from tests.scripts.desktop_update.windows_handoff_support import _log
 from tests.waiting import wait_until
 fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT | os.O_BINARY, 0o644)
@@ -180,9 +181,11 @@ def test_result_finished_at_is_stamped_after_the_r6_release_wait(tmp_path: Path)
     messages = queue.Queue()
 
     def hold_checkout(home: Path, install: Path) -> None:
-        proc = subprocess.Popen([sys.executable, '-c', _TIMED_CHECKOUT_HOLDER,
-                                 str(install / '.hermes-update.lock'), '25', str(home)],
-                                cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        holder = tmp_path / 'checkout_holder.py'
+        holder.write_text(_TIMED_CHECKOUT_HOLDER, encoding='utf-8')
+        proc = subprocess.Popen([sys.executable, str(holder),
+                                 str(install / '.hermes-update.lock'), '25', str(home), str(ROOT)],
+                                cwd=tmp_path, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         holders.append((proc, 0))
         assert proc.stdout is not None
         output = proc.stdout
