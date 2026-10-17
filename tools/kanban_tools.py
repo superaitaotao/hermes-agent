@@ -22,7 +22,7 @@ from hermes_cli.config import cfg_get, load_config
 from tools.kanban_tools_schemas import (
     KANBAN_ATTACH_SCHEMA,
     KANBAN_ATTACH_URL_SCHEMA, KANBAN_ATTACHMENTS_SCHEMA, KANBAN_BLOCK_SCHEMA, KANBAN_COMMENT_SCHEMA,
-    KANBAN_COMPLETE_SCHEMA, KANBAN_CREATE_SCHEMA, KANBAN_HEARTBEAT_SCHEMA, KANBAN_LINK_SCHEMA,
+    KANBAN_COMPLETE_SCHEMA, KANBAN_CREATE_SCHEMA, KANBAN_HANDOFF_SCHEMA, KANBAN_HEARTBEAT_SCHEMA, KANBAN_LINK_SCHEMA,
     KANBAN_LIST_SCHEMA, KANBAN_REQUEST_CHANGES_SCHEMA, KANBAN_REQUEST_REVIEW_SCHEMA,
     KANBAN_SCHEDULE_SCHEMA, KANBAN_SHOW_SCHEMA, KANBAN_UNBLOCK_SCHEMA)
 
@@ -109,7 +109,7 @@ def _check_kanban_orchestrator_mode() -> bool:
 # would silently skip the run-ownership CAS in kanban_db. Non-lifecycle tools
 # (heartbeat / attach / attach_url) do not terminate a run and are not gated.
 _RUN_LIFECYCLE_TOOLS = frozenset({
-    "kanban_complete", "kanban_block", "kanban_schedule",
+    "kanban_complete", "kanban_block", "kanban_schedule", "kanban_handoff",
     "kanban_request_review", "kanban_request_changes",
 })
 
@@ -870,6 +870,31 @@ def _handle_schedule(args: dict, **kw) -> str:
         return _ok_landed(kb, conn, tid, "scheduled", reason=reason)
 
 
+@_kanban_handler("kanban_handoff")
+def _handle_handoff(args: dict, **kw) -> str:
+    """Give the current card to the profile that owns its next step."""
+    tid = _worker_guard("kanban_handoff", args)
+    reason = _redact(_require_text(
+        args, "reason", "reason is required — say why that profile owns the next step"))
+    assignee = str(args.get("assignee") or "").strip()
+    _check(assignee, "assignee is required — name the installed profile that owns the next step")
+    from hermes_cli.profiles import list_profile_names, profile_exists
+
+    # An unspawnable assignee would strand the card exactly like a relay that never runs.
+    _check(profile_exists(assignee),
+           f"assignee profile {assignee!r} is not installed. "
+           f"Installed profiles: {', '.join(list_profile_names())}")
+    with _board(args.get("board")) as (kb, conn):
+        task = kb.get_task(conn, tid)
+        _check(not (task and task.goal_mode),
+               "goal_mode tasks cannot hand off: finish through kanban_complete so the "
+               "completion judge evaluates the goal, or kanban_block for a genuine blocker.")
+        ok, detail = kb.handoff_task(
+            conn, tid, assignee=assignee, reason=reason, expected_run_id=_worker_run_id(tid))
+        _check(ok, f"could not hand off {tid}: {detail}")
+        return _ok_landed(kb, conn, tid, detail or "ready", assignee=assignee)
+
+
 @_kanban_handler("kanban_request_review")
 def _handle_request_review(args: dict, **kw) -> str:
     """Move implementation into the first-class review phase."""
@@ -983,18 +1008,49 @@ def _store_attachment(board, tid, filename, data, content_type) -> str:
         return _ok(task_id=tid, attachment_id=att_id, size=len(data))
 
 
+def _read_attach_path(path_arg: str, filename_arg) -> tuple[bytes, str]:
+    """Read a local file for ``kanban_attach(path=...)`` -> ``(data, filename)``.
+
+    The read happens in Hermes, so it applies ``read_file``'s denylist: a path
+    attach must never copy a credential store onto a board attachment."""
+    from pathlib import Path
+    from agent.file_safety import get_read_block_error
+    from hermes_cli import kanban_db as _kb
+    src = Path(path_arg).expanduser()
+    _check(src.is_absolute(), f"path must be absolute: {path_arg}")
+    blocked = get_read_block_error(str(src))
+    _check(not blocked, f"path refused: {blocked}")
+    _check(src.is_file(), f"path is not a readable regular file: {path_arg}")
+    _check(src.stat().st_size <= _kb.KANBAN_ATTACHMENT_MAX_BYTES,
+           f"attachment exceeds {_kb.KANBAN_ATTACHMENT_MAX_BYTES // (1024 * 1024)} MB limit")
+    filename = str(filename_arg or "").strip() or src.name
+    return src.read_bytes(), filename
+
+
 @_kanban_handler("kanban_attach")
 def _handle_attach(args: dict, **kw) -> str:
-    """Attach an inline (base64) file to a task."""
+    """Attach a file to a task from a local ``path`` (read server-side,
+    byte-exact) or inline ``content_base64``.
+
+    ``path`` exists because models that hand-produce base64 for a file
+    corrupt it once it passes a few KB (truncation, flipped bytes), so
+    binary evidence silently arrives broken."""
     tid = _worker_guard("kanban_attach", args)
-    filename = _require_text(args, "filename")
-    content_b64 = _require_text(args, "content_base64")
-    import base64
-    import binascii
-    try:
-        data = base64.b64decode(str(content_b64), validate=True)
-    except (binascii.Error, ValueError) as e:
-        raise _Reject(f"content_base64 is not valid base64: {e}")
+    path_arg = args.get("path")
+    content_b64 = args.get("content_base64")
+    has_path = bool(path_arg and str(path_arg).strip())
+    has_b64 = bool(content_b64 and str(content_b64).strip())
+    _check(has_path != has_b64, "pass exactly one of path or content_base64 (prefer path)")
+    if has_path:
+        data, filename = _read_attach_path(str(path_arg).strip(), args.get("filename"))
+    else:
+        filename = _require_text(args, "filename")
+        import base64
+        import binascii
+        try:
+            data = base64.b64decode(str(content_b64), validate=True)
+        except (binascii.Error, ValueError) as e:
+            raise _Reject(f"content_base64 is not valid base64: {e} (pass path= instead)")
     return _store_attachment(args.get("board"), tid, filename, data, args.get("content_type"))
 
 
@@ -1298,6 +1354,7 @@ _TOOLS = (
     ("kanban_complete", KANBAN_COMPLETE_SCHEMA, _handle_complete, "✔"),
     ("kanban_block", KANBAN_BLOCK_SCHEMA, _handle_block, "⏸"),
     ("kanban_schedule", KANBAN_SCHEDULE_SCHEMA, _handle_schedule, "⏰"),
+    ("kanban_handoff", KANBAN_HANDOFF_SCHEMA, _handle_handoff, "➡"),
     ("kanban_request_review", KANBAN_REQUEST_REVIEW_SCHEMA, _handle_request_review, "👀"),
     ("kanban_request_changes", KANBAN_REQUEST_CHANGES_SCHEMA, _handle_request_changes, "↩"),
     ("kanban_heartbeat", KANBAN_HEARTBEAT_SCHEMA, _handle_heartbeat, "💓"),

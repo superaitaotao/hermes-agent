@@ -1620,7 +1620,12 @@ def check_respawn_guard(
         # Strictly after: a same-second tie stays guarded (fail closed).
         if any(_is_handoff_event(e["kind"], e["payload"]) for _, e in _rows_since(
                 conn, "task_events", task_id, max(pr_times),
-                "AND kind IN ('assigned', 'changes_requested', 'review_reopened')", cols=", kind, payload", strict=True)):
+                "AND kind IN ('assigned', 'changes_requested', 'review_reopened', 'unblocked')",
+                cols=", kind, payload", strict=True)):
+            return None
+        # A run that timed out after the PR comment was the same owner mid-PR, out of budget: resume
+        # it on that PR (the failure breaker still bounds repeats). Crashes stay guarded.
+        if any(_rows_since(conn, "task_runs", task_id, max(pr_times), "AND outcome = 'timed_out'", strict=True)):
             return None
         return "active_pr"
 

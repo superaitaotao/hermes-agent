@@ -23,6 +23,7 @@ _TERMINAL_KANBAN_TOOLS = frozenset({
     "kanban_complete",
     "kanban_block",
     "kanban_schedule",
+    "kanban_handoff",
     "kanban_request_review",
     "kanban_request_changes",
 })
