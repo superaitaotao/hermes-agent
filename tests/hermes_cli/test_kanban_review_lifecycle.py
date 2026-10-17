@@ -928,3 +928,48 @@ def test_synthesized_run_for_unassigned_card_keeps_null_profile(kanban_home: Pat
             "SELECT profile, outcome FROM task_runs WHERE task_id = ? ORDER BY id DESC LIMIT 1", (tid,),
         ).fetchone()
         assert (run["outcome"], run["profile"]) == ("blocked", None)
+
+
+def test_active_pr_guard_lifts_after_unblock_or_timed_out_run(kanban_home: Path) -> None:
+    """A deliberate resume of the same owner on its own PR is not duplicate work.
+
+    ``active_pr`` stops a fresh implementer from opening a second PR. Two events after the newest
+    PR comment are explicit "carry on with THAT PR" signals and must lift it, like ``unblocked``
+    already lifts ``recent_success``: an operator ``unblock`` (the blocker was cleared on purpose),
+    and a run that ended ``timed_out`` (the implementer ran out of budget mid-PR; the failure
+    breaker still bounds repeats). A crash stays guarded.
+    """
+    pr_comment = "Opened https://github.com/example/repo/pull/44 for review."
+    with kbc.connect() as conn:
+        unblocked = kb.create_task(conn, title="unblocked pr", assignee="dev")
+        claimed = kb.claim_task(conn, unblocked)
+        kb.add_comment(conn, unblocked, author="dev", body=pr_comment)
+        _backdate_comments(conn, unblocked)
+        assert kb.block_task(conn, unblocked, reason="needs user", kind="needs_input",
+                             expected_run_id=claimed.current_run_id)
+        assert kb.unblock_task(conn, unblocked)
+        assert kb.get_task(conn, unblocked).status == "ready"
+        assert kbd.check_respawn_guard(conn, unblocked) is None
+
+        timed = kb.create_task(conn, title="timed out pr", assignee="dev")
+        kb.add_comment(conn, timed, author="dev", body=pr_comment)
+        _backdate_comments(conn, timed)
+        now = int(__import__("time").time())
+        with kb.write_txn(conn):
+            conn.execute(
+                "INSERT INTO task_runs (task_id, profile, status, outcome, started_at, ended_at) "
+                "VALUES (?, 'dev', 'timed_out', 'timed_out', ?, ?)", (timed, now - 30, now))
+        assert kbd.check_respawn_guard(conn, timed) is None
+
+        crashed = kb.create_task(conn, title="crashed pr", assignee="dev")
+        kb.add_comment(conn, crashed, author="dev", body=pr_comment)
+        _backdate_comments(conn, crashed)
+        with kb.write_txn(conn):
+            conn.execute(
+                "INSERT INTO task_runs (task_id, profile, status, outcome, started_at, ended_at) "
+                "VALUES (?, 'dev', 'crashed', 'crashed', ?, ?)", (crashed, now - 30, now))
+        assert kbd.check_respawn_guard(conn, crashed) == "active_pr"
+
+        # A newer PR comment after the resume guards again.
+        kb.add_comment(conn, timed, author="dev", body="Pushed to https://github.com/example/repo/pull/44")
+        assert kbd.check_respawn_guard(conn, timed) == "active_pr"
