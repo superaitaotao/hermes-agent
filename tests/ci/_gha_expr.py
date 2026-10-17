@@ -178,6 +178,8 @@ class _Parser:
             if fn is None:
                 raise Unsupported(f"{name}() outside a modelled job status in {self.text!r}")
             return fn
+        if name == "format":
+            return args[0].format(*(to_string(arg) for arg in args[1:]))
         if name == "toJSON":
             return json.dumps(args[0])
         if name == "fromJSON":
