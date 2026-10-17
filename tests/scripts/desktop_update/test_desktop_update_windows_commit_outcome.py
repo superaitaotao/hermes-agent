@@ -165,8 +165,12 @@ os.lseek(fd, 1 << 20, os.SEEK_SET)
 msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)   # hermes_cli/update_lock.py::_try_lock's byte
 print('ready', flush=True)
 home = Path(sys.argv[3])
-wait_until(lambda: 'hermes update exit code: 0' in _log(home),
-           timeout=120, what='update completion before the checkout hold')
+def update_completed():
+    try:
+        return 'hermes update exit code: 0' in _log(home)
+    except (OSError, UnicodeDecodeError):
+        return False
+wait_until(update_completed, timeout=120, what='update completion before the checkout hold')
 print(time.time() + float(sys.argv[2]), flush=True)
 time.sleep(float(sys.argv[2]))
 """
@@ -203,7 +207,19 @@ def test_result_finished_at_is_stamped_after_the_r6_release_wait(tmp_path: Path)
 
     try:
         code, out, _, result, home = _handoff(tmp_path, '-NoGateway', prepare=hold_checkout)
-        holders[0] = (holders[0][0], float(messages.get(timeout=30)))
+        line = messages.get(timeout=30)
+        try:
+            deadline = float(line)
+        except ValueError:
+            output = [line]
+            drain_until = time.monotonic() + 5
+            while time.monotonic() < drain_until:
+                try:
+                    output.append(messages.get(timeout=max(0.001, drain_until - time.monotonic())))
+                except queue.Empty:
+                    break
+            pytest.fail('checkout holder failed after acquiring its lock:\n' + ''.join(output))
+        holders[0] = (holders[0][0], deadline)
     finally:
         for proc, _ in holders:
             proc.kill(); proc.wait()
