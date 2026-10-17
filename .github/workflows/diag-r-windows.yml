@@ -1,0 +1,57 @@
+name: R Windows v5 fixture verification
+on:
+  push:
+    branches: ['diag/r-windows-v5/repeat-1']
+permissions:
+  contents: read
+jobs:
+  diagnose:
+    name: ${{ matrix.arch }} ${{ matrix.phase }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-latest
+            arch: X64
+            phase: r6
+          - runner: windows-11-arm
+            arch: ARM64
+            phase: r6
+    steps:
+      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a
+      - name: Set up native ARM64 build dependencies
+        if: runner.arch == 'ARM64'
+        uses: ./.github/actions/setup-windows-build-deps
+      - uses: ./.github/actions/setup-pm
+        with:
+          packages: git,ripgrep
+          extras: '["all", "telegram", "anthropic", "mistral", "fal", "modal", "daytona", "parallel-web"]'
+          test-environment: 'true'
+          prune-python-cache: true
+      - name: Native identity
+        shell: bash
+        env:
+          EXPECTED_ARCH: ${{ matrix.arch }}
+        run: |
+          "$HERMES_PYTHON" - <<'PY'
+          import json, os, platform, subprocess, sys
+          expected = os.environ['EXPECTED_ARCH']
+          print(json.dumps({'runner_os': os.environ['RUNNER_OS'], 'runner_arch': os.environ['RUNNER_ARCH'], 'machine': platform.machine(), 'interpreter': sys.executable, 'tested_sha': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(), 'cpus': os.cpu_count()}))
+          assert os.environ['RUNNER_OS'] == 'Windows'
+          assert os.environ['RUNNER_ARCH'] == expected
+          assert platform.machine().upper() in ({'ARM64', 'AARCH64'} if expected == 'ARM64' else {'AMD64', 'X86_64'})
+          PY
+      - name: Verify native fixtures
+        env:
+          HERMES_TEST_FILE_RETRIES: '0'
+        shell: bash
+        run: |
+          export DIAG_BASH="$(cygpath -w "$BASH")"
+          "$HERMES_PYTHON" tests/ci/diag_r_campaign.py "${{ matrix.phase }}" --file commit_outcome --output "$RUNNER_TEMP/fixture-diag"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: fixture-${{ matrix.arch }}-${{ matrix.phase }}
+          path: ${{ runner.temp }}/fixture-diag
