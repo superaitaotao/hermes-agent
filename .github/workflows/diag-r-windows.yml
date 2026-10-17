@@ -1,0 +1,47 @@
+name: R v4 Windows launch measurement
+on:
+  push:
+    branches: ['diag/r-windows-v4/**']
+permissions:
+  contents: read
+jobs:
+  probe:
+    name: ${{ matrix.id }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {id: x64-DN-1, runner: windows-latest, order: DN}
+          - {id: x64-DN-2, runner: windows-latest, order: DN}
+          - {id: x64-ND-1, runner: windows-latest, order: ND}
+          - {id: x64-ND-2, runner: windows-latest, order: ND}
+          - {id: x64-control-1, runner: windows-latest, order: control}
+          - {id: x64-control-2, runner: windows-latest, order: control}
+          - {id: arm64-DN-1, runner: windows-11-arm, order: DN}
+          - {id: arm64-ND-1, runner: windows-11-arm, order: ND}
+          - {id: arm64-control-1, runner: windows-11-arm, order: control}
+    steps:
+      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a
+      - name: Set up native ARM64 build dependencies
+        if: runner.arch == 'ARM64'
+        uses: ./.github/actions/setup-windows-build-deps
+      - name: Set up locked Python and test dependencies
+        uses: ./.github/actions/setup-pm
+        with:
+          packages: git,ripgrep
+          extras: '["all", "telegram", "anthropic", "mistral", "fal", "modal", "daytona", "parallel-web"]'
+          test-environment: 'true'
+          prune-python-cache: true
+      - name: Measure Windows launches
+        shell: pwsh
+        run: |
+          & ./tests/ci/diag_r_launch_probe.ps1 -Order '${{ matrix.order }}' -Replica '${{ matrix.id }}' -OutputPath "$env:RUNNER_TEMP/r-launch-${{ matrix.id }}.json"
+      - name: Preserve launch evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: r-launch-${{ matrix.id }}
+          path: ${{ runner.temp }}/r-launch-${{ matrix.id }}.json
+          if-no-files-found: error
