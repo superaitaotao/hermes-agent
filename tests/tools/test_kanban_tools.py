@@ -481,6 +481,127 @@ def test_schedule_rejects_invalid_reason_and_unowned_contexts(monkeypatch, worke
         assert kb.get_task(conn, other).status == "ready"
 
 
+def test_handoff_routes_own_card_to_next_owner_in_one_transition(monkeypatch, worker_env):
+    """The lane that decides the next owner executes it: the card leaves this run
+    assigned to that profile and dispatchable, with no relay run in between."""
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+    from hermes_cli import profiles as profiles_mod
+    from tools import kanban_tools as kt
+    from tools.registry import registry
+
+    monkeypatch.setattr(profiles_mod, "profile_exists", lambda name: name == "next-lane")
+    entry = registry.get_entry("kanban_handoff")
+    assert entry is not None and entry.toolset == "kanban"
+    out = json.loads(entry.handler({"assignee": "next-lane", "reason": "Owner: next-lane runs the resync."}))
+
+    assert out["ok"] is True and out["status"] == "ready" and out["assignee"] == "next-lane", out
+    with kbc.connect() as conn:
+        task = kb.get_task(conn, worker_env)
+        assert (task.status, task.assignee, task.current_run_id) == ("ready", "next-lane", None)
+        run = kb.latest_run(conn, worker_env)
+        assert (run.outcome, run.profile) == ("handed_off", "test-worker")
+        events = {e.kind: e.payload for e in kb.list_events(conn, worker_env)}
+        assert events["assigned"]["from"] == "test-worker"
+        assert events["assigned"]["assignee"] == "next-lane"
+        assert events["handed_off"]["reason"] == "Owner: next-lane runs the resync."
+
+
+def test_handoff_lands_in_todo_while_a_parent_is_open(monkeypatch, worker_env):
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+    from hermes_cli import profiles as profiles_mod
+    from tools import kanban_tools as kt
+
+    monkeypatch.setattr(profiles_mod, "profile_exists", lambda name: True)
+    with kbc.connect() as conn:
+        parent = kb.create_task(conn, title="tooling card", assignee="peer")
+        kb.link_tasks(conn, parent_id=parent, child_id=worker_env,
+                      expected_child_run_id=kb._current_run_id(conn, worker_env))
+    out = json.loads(kt._handle_handoff({"assignee": "next-lane", "reason": "after the tooling card"}))
+    assert out["status"] == "todo", out
+    with kbc.connect() as conn:
+        assert kb.get_task(conn, worker_env).assignee == "next-lane"
+
+
+def test_handoff_refuses_unknown_self_foreign_and_delegated(monkeypatch, worker_env):
+    """Fail closed: an unspawnable assignee would strand the card, a self-handoff is a
+    disguised retry, and only the run owner may route its card."""
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+    from hermes_cli import profiles as profiles_mod
+    from tools import kanban_tools as kt
+
+    monkeypatch.setattr(profiles_mod, "profile_exists", lambda name: name in {"next-lane", "test-worker"})
+    with kbc.connect() as conn:
+        other = kb.create_task(conn, title="sibling", assignee="peer")
+
+    unknown = json.loads(kt._handle_handoff({"assignee": "ghost", "reason": "r"}))
+    to_self = json.loads(kt._handle_handoff({"assignee": "test-worker", "reason": "r"}))
+    no_reason = json.loads(kt._handle_handoff({"assignee": "next-lane"}))
+    foreign = json.loads(kt._handle_handoff({"task_id": other, "assignee": "next-lane", "reason": "r"}))
+    monkeypatch.setattr(
+        kt, "_delegation_ctx",
+        lambda predicate, default: predicate == "is_delegated_child_process_context",
+    )
+    delegated = json.loads(kt._handle_handoff({"assignee": "next-lane", "reason": "r"}))
+
+    assert "not installed" in unknown["error"]
+    assert "already assigned" in to_self["error"]
+    assert "reason is required" in no_reason["error"]
+    assert "refusing to mutate" in foreign["error"]
+    assert "delegate_task child agents are not Kanban run owners" in delegated["error"]
+    with kbc.connect() as conn:
+        task = kb.get_task(conn, worker_env)
+        assert (task.status, task.assignee) == ("running", "test-worker")
+
+
+def test_handoff_refused_for_a_review_run(monkeypatch, worker_env):
+    """A reviewer routes with request_changes / complete; handoff must not become a
+    side door around the review verdict."""
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+    from hermes_cli import profiles as profiles_mod
+    from tools import kanban_tools as kt
+
+    monkeypatch.setattr(profiles_mod, "profile_exists", lambda name: True)
+    with kbc.connect() as conn:
+        run_id = kb._current_run_id(conn, worker_env)
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE task_events SET payload = json_set(COALESCE(payload, '{}'), '$.source_status', 'review') "
+                "WHERE task_id = ? AND kind = 'claimed' AND run_id = ?", (worker_env, run_id))
+    out = json.loads(kt._handle_handoff({"assignee": "next-lane", "reason": "r"}))
+    assert "review" in out["error"], out
+    with kbc.connect() as conn:
+        assert kb.get_task(conn, worker_env).status == "running"
+
+
+def test_handoff_after_pr_comment_lets_the_new_owner_spawn(monkeypatch, worker_env):
+    """The relay existed because the PR-comment respawn guard (active_pr) held the
+    card for its old lane. A handoff names who works the PR next, so the dispatcher
+    must not hold the new owner's spawn."""
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+    from hermes_cli import kanban_db_dispatch as kbd
+    from hermes_cli import profiles as profiles_mod
+    from tools import kanban_tools as kt
+
+    monkeypatch.setattr(profiles_mod, "profile_exists", lambda name: True)
+    with kbc.connect() as conn:
+        kb.add_comment(conn, worker_env, "test-worker",
+                       "PR https://github.com/acme/repo/pull/7 is open at abc1234.")
+        # Same-second ties stay guarded by design (fail closed); a real run posts the PR first.
+        with kb.write_txn(conn):
+            conn.execute("UPDATE task_comments SET created_at = created_at - 60 WHERE task_id = ?",
+                         (worker_env,))
+        assert kbd.check_respawn_guard(conn, worker_env, lane="ready") == "active_pr"
+    out = json.loads(kt._handle_handoff({"assignee": "next-lane", "reason": "next-lane publishes the media"}))
+    assert out["status"] == "ready", out
+    with kbc.connect() as conn:
+        assert kbd.check_respawn_guard(conn, worker_env, lane="ready") is None
+
+
 def _make_goal_mode_worker_env(monkeypatch, tmp_path):
     """Set up an isolated HERMES_HOME with one claimed goal_mode task,
     matching the pattern used by the kanban_complete judge gate tests."""
@@ -1321,6 +1442,61 @@ def test_maybe_auto_subscribe_swallows_add_notify_sub_failure(monkeypatch, worke
 # ---------------------------------------------------------------------------
 # Attachments — kanban_attach / kanban_attach_url / kanban_attachments
 # ---------------------------------------------------------------------------
+
+
+def test_attach_path_is_byte_exact_for_large_binary(worker_env, tmp_path):
+    """path= attaches binary byte-exact well past the size where
+    model-produced base64 corrupts."""
+    import hashlib
+    import os
+    from pathlib import Path
+    from tools import kanban_tools as kt
+
+    src = tmp_path / "evidence.zip"
+    payload = os.urandom(200_000)
+    src.write_bytes(payload)
+    d = json.loads(kt._handle_attach({"path": str(src)}))
+    assert "error" not in d, d
+    assert d["size"] == len(payload)
+    listed = json.loads(kt._handle_attachments({}))
+    att = next(a for a in listed["attachments"] if a["id"] == d["attachment_id"])
+    assert att["filename"] == "evidence.zip"
+    stored = Path(att["stored_path"]).read_bytes()
+    assert hashlib.sha256(stored).digest() == hashlib.sha256(payload).digest()
+
+
+def test_attach_rejects_both_or_neither_and_bad_paths(worker_env, tmp_path):
+    from tools import kanban_tools as kt
+
+    assert "error" in json.loads(kt._handle_attach({"filename": "x.txt"}))
+    f = tmp_path / "a.txt"
+    f.write_text("hi")
+    both = json.loads(kt._handle_attach({"path": str(f), "content_base64": "aGk=", "filename": "a.txt"}))
+    assert "error" in both
+    assert "error" in json.loads(kt._handle_attach({"path": "relative/a.txt"}))
+    assert "error" in json.loads(kt._handle_attach({"path": str(tmp_path / "missing.bin")}))
+
+
+def test_attach_path_refuses_hermes_credential_files(worker_env):
+    """path= reads server-side, so it must apply read_file's credential denylist:
+    otherwise any worker could copy the profile .env onto a board attachment."""
+    import os
+    from pathlib import Path
+    from tools import kanban_tools as kt
+
+    secret = Path(os.environ["HERMES_HOME"]) / ".env"
+    secret.write_text("OPENAI_API_KEY=sk-test\n")
+    d = json.loads(kt._handle_attach({"path": str(secret)}))
+    assert "error" in d, d
+    assert json.loads(kt._handle_attachments({}))["attachments"] == []
+
+
+def test_attach_base64_fallback_still_works(worker_env):
+    from tools import kanban_tools as kt
+
+    d = json.loads(kt._handle_attach({"filename": "n.txt", "content_base64": "aGVsbG8="}))
+    assert "error" not in d, d
+    assert d["size"] == 5
 
 
 def test_attach_url_rejects_non_http_scheme(worker_env):

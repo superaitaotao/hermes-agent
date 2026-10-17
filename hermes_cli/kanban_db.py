@@ -3499,6 +3499,67 @@ def request_changes(
     return True, implementer
 
 
+def handoff_task(
+    conn: sqlite3.Connection, task_id: str, *, assignee: str, reason: str,
+    expected_run_id: Optional[int] = None,
+) -> tuple[bool, Optional[str]]:
+    """End the active implementation run and give the card to ``assignee`` in
+    one transaction. Returns ``(ok, landed_status | refusal)``.
+
+    The lane that decides the next owner executes it, so the decision never
+    waits for a relay run or a recovery tick to apply ``reassign`` + ``unblock``.
+    The ``assigned`` event carries ``from``, which the respawn guard reads as a
+    real handoff. Lands ``ready`` (``todo`` while a parent is open). Refused for
+    a run claimed from ``review``: the reviewer's verdict tools own that card.
+    """
+    reason = str(redact_review_value(reason or "")).strip()
+    if not reason:
+        return False, "reason is required"
+    target = _canonical_assignee(assignee)
+    if not target:
+        return False, "assignee is required"
+    with write_txn(conn):
+        row = conn.execute(
+            "SELECT status, assignee, current_run_id FROM tasks WHERE id = ?", (task_id,),
+        ).fetchone()
+        if row is None:
+            return False, "task not found"
+        run_id = row["current_run_id"]
+        if row["status"] != "running" or run_id is None:
+            return False, "task is not in an active run"
+        if expected_run_id is not None and int(run_id) != int(expected_run_id):
+            return False, "run_id mismatch"
+        claimed = _json_dict(_row_get(_latest_event(conn, task_id, "claimed", run_id), "payload"))
+        if claimed.get("source_status") == "review":
+            return False, ("a review run cannot hand off; approve with kanban_complete or "
+                           "return the card with kanban_request_changes")
+        source = row["assignee"]
+        if target == source:
+            return False, f"card is already assigned to {target}; finish or block it instead"
+        new_status = _landing_status_after_parents(conn, task_id)
+        cur = conn.execute(
+            """
+            UPDATE tasks
+               SET status = ?, assignee = ?,
+                   claim_lock = NULL, claim_expires = NULL,
+                   worker_pid = NULL, worker_started_at = NULL,
+                   consecutive_failures = 0, last_failure_error = NULL
+             WHERE id = ? AND status = 'running' AND current_run_id = ?
+            """,
+            (new_status, target, task_id, int(run_id)),
+        )
+        if cur.rowcount != 1:
+            return False, "task changed during handoff"
+        ended = _end_run(conn, task_id, outcome="handed_off", status=new_status, summary=reason)
+        _append_event(conn, task_id, "assigned", {"assignee": target, "from": source, "source": "handoff"},
+                      run_id=ended)
+        _append_event(conn, task_id, "handed_off",
+                      {"reason": reason, "from": source, "assignee": target, "status": new_status},
+                      run_id=ended)
+    notify_task_updated(conn, task_id, ("assignee", "status"))
+    return True, new_status
+
+
 def promote_task(
     conn: sqlite3.Connection, task_id: str, *, actor: str, reason: Optional[str] = None,
     dry_run: bool = False,

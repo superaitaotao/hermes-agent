@@ -221,6 +221,28 @@ KANBAN_SCHEDULE_SCHEMA = _schema(
     [],
 )
 
+KANBAN_HANDOFF_SCHEMA = _schema(
+    "kanban_handoff",
+    (
+        "End your run and give THIS card to another installed profile, so the "
+        "next owner's worker starts on it directly. Use when you have decided "
+        "who owns the next step and that is not you and not a review (use "
+        "kanban_request_review for review). Examples: routing a card to the "
+        "coder or operator, or returning it to the planner for a re-plan. The "
+        "card lands ready (todo while a parent is still open). Do not block a "
+        "card just to ask someone else to reassign it — hand it off."
+    ),
+    {
+        "task_id": _prop("string", _DESC_TASK_ID_DEFAULT),
+        "assignee": _prop("string", "Installed profile that owns the next step (not your own profile)."),
+        "reason": _prop("string", (
+            "Why that profile owns it and what it should do first, in one or two "
+            "sentences. Recorded on the run and shown to the next worker."
+        )),
+    },
+    ["assignee", "reason"],
+)
+
 
 KANBAN_REQUEST_REVIEW_SCHEMA = _schema(
     "kanban_request_review",
@@ -335,26 +357,37 @@ KANBAN_COMMENT_SCHEMA = _schema(
 KANBAN_ATTACH_SCHEMA = _schema(
     "kanban_attach",
     (
-        "Attach a file to a task by passing its bytes inline (base64). "
-        "Use for genuine file artifacts the next worker or a human should "
-        "be able to download — generated reports, images, exports. The "
-        "file is stored as a real attachment (not a comment link) under "
-        "the task's attachments dir, capped at 25 MB. Prefer "
+        "Attach a file to a task. Pass `path` (absolute path to a file on "
+        "disk; Hermes reads it byte-exact): write the file first, then "
+        "attach it. Do not hand-produce base64 for a file; it corrupts "
+        "past a few KB. `content_base64` is a fallback for tiny inline "
+        "content only. Use for genuine file artifacts the next worker or "
+        "a human should be able to download — reports, images, exports. "
+        "Stored as a real attachment (not a comment link) under the "
+        "task's attachments dir, capped at 25 MB. Prefer "
         "kanban_attach_url when you only have a URL."
     ),
     {
         "task_id": _prop("string", _DESC_TASK_ID_DEFAULT),
+        "path": _prop("string", (
+                "Absolute path of a local file to attach (preferred). "
+                "Read server-side, byte-exact, up to 25 MB."
+        )),
         "filename": _prop("string", (
-                "File name to store it under (e.g. 'report.pdf'). "
-                "Directory components are stripped; only the leaf is kept."
+                "File name to store it under (e.g. 'report.pdf'). Optional "
+                "with path (defaults to the file's name); required with "
+                "content_base64. Directory components are stripped."
         )),
         "content_base64": {
             "type": "string",
-            "description": "The file contents, base64-encoded. Max 25 MB decoded.",
+            "description": (
+                "Fallback: file contents, base64-encoded, for tiny content "
+                "you cannot write to disk. Prefer path."
+            ),
         },
         "content_type": _prop("string", "Optional MIME type (e.g. 'application/pdf')."),
     },
-    ["filename", "content_base64"],
+    [],
 )
 
 KANBAN_ATTACH_URL_SCHEMA = _schema(

@@ -28,7 +28,7 @@ _HERMES_CORE_TOOLS = [
     "cronjob_manage",
     "kanban_show", "kanban_list",
     "kanban_complete", "kanban_block", "kanban_request_review",
-    "kanban_request_changes",
+    "kanban_request_changes", "kanban_handoff",
     "kanban_heartbeat",
     "kanban_comment", "kanban_create", "kanban_link",
     "kanban_unblock",
