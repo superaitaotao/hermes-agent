@@ -24,6 +24,8 @@ def github(tmp_path, monkeypatch, *, db_path=None):
                     "headRefOid": sha, "baseRefName": "main", "state": "OPEN",
                     "baseRef": {"branchProtectionRule": {"requiredStatusChecks": [
                         {"context": "required", "app": {"databaseId": 1}}]}}}}}}
+            elif self.path == "/repos/acme/repo/branches/main":
+                value = {"name": "main", "protected": False}
             elif "/rules/branches/" in self.path:
                 value = [[]]
             elif "/check-runs" in self.path:
@@ -58,7 +60,8 @@ def github(tmp_path, monkeypatch, *, db_path=None):
                 if state.get("final_race"):
                     state["final_race"]()
                 value = state.get("final", value)
-            key = next((k for k in ("graphql", "rules", "check-runs", "statuses") if k in self.path), "final")
+            key = "branch" if self.path == "/repos/acme/repo/branches/main" else next(
+                (k for k in ("graphql", "rules", "check-runs", "statuses") if k in self.path), "final")
             value = state.get("responses", {}).get(key, value)
             code = state.get("http_errors", {}).get(key, 200)
             self.send_response(code)
@@ -211,6 +214,15 @@ def test_absent_required_ci_completes_with_not_applicable_receipt(github, pr_sta
 
 @pytest.mark.platforms("linux")
 @pytest.mark.parametrize("fault,classification", [
+    ({"responses": {"branch": {"name": "main", "protected": True, "protection": {"required_status_checks": {"checks": [{"context": "hidden-ci", "app_id": None}]}}}}}, "infra"),
+    ({"responses": {"branch": {"name": "main", "protected": True}}}, "infra"),
+    ({"responses": {"branch": {"name": "other", "protected": False}}}, "infra"),
+    ({"responses": {"branch": {"name": "main", "protected": 0}}}, "infra"),
+    ({"responses": {"branch": {"name": "main"}}}, "infra"),
+    ({"responses": {"branch": None}}, "infra"),
+    ({"http_errors": {"branch": 403}}, "auth"),
+    ({"http_errors": {"branch": 503}}, "infra"),
+    ({"raw": {"branch": "not json"}}, "infra"),
     ({"omit_base": True}, "infra"),
     ({"base": None}, "infra"),
     ({"base": {}}, "infra"),
