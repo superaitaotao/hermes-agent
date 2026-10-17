@@ -61,10 +61,21 @@ dashboard completion. It reads classic branch protection and active ruleset
 required contexts, paginates exact-head check runs and legacy statuses, then
 re-reads the PR head/base. Optional failed/skipped telemetry does not veto accepted
 required checks. Missing, pending, failed, cancelled, timed-out, stale, skipped or
-neutral **required** evidence cannot complete the card. Neither can zero-run
-acceptance, unreadable policy or GitHub API failures. A repository without required
-checks needs a local-only contract. `gh` must be authenticated with read access to
-the repository's checks and rules; no remote writes are performed by this gate.
+neutral **required** evidence cannot complete the card. Unreadable, malformed or
+incomplete policy and GitHub API failures also refuse acceptance. A null GraphQL
+classic-protection rule is not proof of absence: GitHub hides it from non-admin
+readers too. The gate corroborates null with the REST base branch and requires
+`protected=false`; a protected branch or unavailable corroboration refuses
+acceptance rather than claiming no CI. After successful
+classic-protection and all-page rules discovery proves an empty required set,
+CI is `not_applicable`. The gate skips check/status reads but still validates the
+fresh PR head, base and state. That receipt has `ok=true`, `required=[]`,
+`checks=[]`, an empty recovery string and the exact `head_sha`, `base_ref` and
+`pr_url`. It does not mean green CI and does not provide review, merge, ancestry
+or artifact proof. Keep PR-backed work PR-backed; use `local-only` only for
+intentionally local work. Nonempty required checks still need successful
+exact-head evidence. `gh` must be authenticated with read access to the
+repository's checks and rules; this gate performs no remote writes.
 Acceptance reads run as the **assignee profile's** `gh` login — its `GH_TOKEN` /
 `GH_CONFIG_DIR` from the profile's own `.env`, never the ambient login of the
 process completing the card. On multi-profile hosts (one GitHub identity per
