@@ -51,6 +51,8 @@ def test_repository_native_pr_execution_contract(repository, fork):
         cell["runner"] = {"os": "Windows" if row["marker"] == "windows" else "macOS", "arch": arch}
         step = _step(os_job, "Run ${{ matrix.marker }} tests")
         workers = gha.to_string(gha.render(step["env"]["HERMES_TEST_WORKERS"], cell))
+        file_cap = gha.to_string(gha.render(step["env"].get("HERMES_TEST_FILE_TIMEOUT", ""), cell))
+        assert file_cap == ("900" if fork and row["marker"] == "windows" else "")
         resolved.append((runner, workers, gha.render(step["env"]["HERMES_TEST_SLICE"], cell)))
         guard = _step(os_job, "Require native Windows test interpreter")
         assert gha.condition(guard["if"], cell) == (fork and row["marker"] == "windows")

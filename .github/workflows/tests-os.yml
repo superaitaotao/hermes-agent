@@ -211,6 +211,10 @@ jobs:
           # starves cold child startup before the fixture's idle deadline.
           HERMES_TEST_WORKERS: ${{ matrix.marker == 'windows' && (github.repository == 'superaitaotao/hermes-agent' && '2' || '16') || '' }}
           HERMES_TEST_SLICE: ${{ matrix.slice || '' }}
+          # The fork's 4-vCPU runners run these PowerShell-heavy files 2-3x slower
+          # than the 32-core upstream rows; upstream, other forks and macOS keep
+          # the runner's own 300 s default. Census: twohomes R attachment 2501.
+          HERMES_TEST_FILE_TIMEOUT: ${{ (github.repository == 'superaitaotao/hermes-agent' && matrix.marker == 'windows') && '900' || '' }}
           # Belt-and-suspenders with tests/conftest.py's env blanking: no
           # test may reach a real provider API.
           OPENROUTER_API_KEY: ''
