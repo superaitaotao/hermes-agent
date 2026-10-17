@@ -134,7 +134,7 @@ def collect_acceptance(contract: str, published_pr: str | None,
         if not isinstance(branch, str) or not branch:
             raise ValueError("PR base branch unavailable")
         receipt["base_ref"] = branch
-        required = _classic_requirements(pr["baseRef"])
+        required = _classic_requirements(pr["baseRef"], repo, branch, profile_home)
         rules = _api(f"repos/{repo}/rules/branches/{quote(branch, safe='')}?per_page=100",
                      paginate=True, profile_home=profile_home)
         required.update(_rules_requirements(rules))
@@ -214,11 +214,15 @@ def _requirement_rows(rows, *, classic=False):
     return required
 
 
-def _classic_requirements(base):
+def _classic_requirements(base, repo, branch, profile_home):
     if not isinstance(base, dict):
         raise ValueError("Base branch unavailable")
     protection = base["branchProtectionRule"]
     if protection is None:
+        # GitHub also hides classic protection as null from non-admin readers.
+        evidence = _api(f"repos/{repo}/branches/{quote(branch, safe='')}", profile_home=profile_home)
+        if evidence["name"] != branch or evidence["protected"] is not False:
+            raise ValueError("Classic branch protection absence is not proven")
         return set()
     if not isinstance(protection, dict):
         raise ValueError("Branch protection unavailable")

@@ -79,6 +79,8 @@ def _isolated(options):
                 with connect_closing(db_path=db) as conn:
                     cases = [
                         ("absent", {"base": {"branchProtectionRule": None}}, "not_applicable"),
+                        ("hidden-protection", {"base": {"branchProtectionRule": None},
+                         "responses": {"branch": {"name": "main", "protected": True}}}, "infra"),
                         ("failure", {"conclusion": "failure"}, "failure"),
                         ("cancelled", {"conclusion": "cancelled"}, "infra"),
                         ("timed_out", {"conclusion": "timed_out"}, "infra"),
@@ -110,7 +112,7 @@ def _lifecycle_case(kb, conn, state, name, fault, classification, expected_base_
     run = dict(conn.execute("SELECT status, outcome FROM task_runs WHERE id=?", (owner.current_run_id,)).fetchone())
     report = {"case": name, "accepted": accepted, "status": task.status,
                     "contract": task.completion_contract, "run": run, "receipt": receipt}
-    if expected_base_refusal and name in {"absent", "malformed-policy", "head-drift"}:
+    if expected_base_refusal and name in {"absent", "hidden-protection", "malformed-policy", "head-drift"}:
         assert accepted is False and receipt["classification"] == "missing"
         assert receipt["detail"] == "No repository-required checks are configured; explicitly use a local-only contract for non-CI tasks."
     else:

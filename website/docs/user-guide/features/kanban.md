@@ -62,7 +62,11 @@ required contexts, paginates exact-head check runs and legacy statuses, then
 re-reads the PR head/base. Optional failed/skipped telemetry does not veto accepted
 required checks. Missing, pending, failed, cancelled, timed-out, stale, skipped or
 neutral **required** evidence cannot complete the card. Unreadable, malformed or
-incomplete policy and GitHub API failures also refuse acceptance. After successful
+incomplete policy and GitHub API failures also refuse acceptance. A null GraphQL
+classic-protection rule is not proof of absence: GitHub hides it from non-admin
+readers too. The gate corroborates null with the REST base branch and requires
+`protected=false`; a protected branch or unavailable corroboration refuses
+acceptance rather than claiming no CI. After successful
 classic-protection and all-page rules discovery proves an empty required set,
 CI is `not_applicable`. The gate skips check/status reads but still validates the
 fresh PR head, base and state. That receipt has `ok=true`, `required=[]`,
