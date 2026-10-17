@@ -69,6 +69,8 @@ def main():
                                     'outcome': outcome, 'finished_at': '2026-10-05T12:00:00+00:00'}, indent=2),
                         encoding='utf-8')
         return int(os.environ.get('HANDOFF_EXIT', '0'))
+    if os.environ.get('HANDOFF_UPDATE_DONE'):
+        Path(os.environ['HANDOFF_UPDATE_DONE']).touch()
     print('Update complete!', flush=True)
     return 0
 if __name__ == '__main__':
@@ -158,19 +160,13 @@ _TIMED_CHECKOUT_HOLDER = """
 import msvcrt, os, sys, time
 from pathlib import Path
 sys.path.insert(0, sys.argv[4])
-from tests.scripts.desktop_update.windows_handoff_support import _log
 from tests.waiting import wait_until
 fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT | os.O_BINARY, 0o644)
 os.lseek(fd, 1 << 20, os.SEEK_SET)
 msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)   # hermes_cli/update_lock.py::_try_lock's byte
 print('ready', flush=True)
-home = Path(sys.argv[3])
-def update_completed():
-    try:
-        return 'hermes update exit code: 0' in _log(home)
-    except (OSError, UnicodeDecodeError):
-        return False
-wait_until(update_completed, timeout=120, what='update completion before the checkout hold')
+done = Path(sys.argv[3])
+wait_until(done.exists, timeout=120, what='update completion before the checkout hold')
 print(time.time() + float(sys.argv[2]), flush=True)
 time.sleep(float(sys.argv[2]))
 """
@@ -181,6 +177,7 @@ def test_result_finished_at_is_stamped_after_the_r6_release_wait(tmp_path: Path)
     # The relaunched Desktop drops a non-manual result whose finished_at is 30 minutes old; the
     # R6 wait lasts up to 2 h. The result must carry the time the hand-off actually finished.
     holders = []
+    update_done = tmp_path / 'update-done'
 
     messages = queue.Queue()
 
@@ -188,7 +185,7 @@ def test_result_finished_at_is_stamped_after_the_r6_release_wait(tmp_path: Path)
         holder = tmp_path / 'checkout_holder.py'
         holder.write_text(_TIMED_CHECKOUT_HOLDER, encoding='utf-8')
         proc = subprocess.Popen([sys.executable, str(holder),
-                                 str(install / '.hermes-update.lock'), '25', str(home), str(ROOT)],
+                                 str(install / '.hermes-update.lock'), '25', str(update_done), str(ROOT)],
                                 cwd=tmp_path, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         holders.append((proc, 0))
         assert proc.stdout is not None
@@ -206,7 +203,8 @@ def test_result_finished_at_is_stamped_after_the_r6_release_wait(tmp_path: Path)
         assert line == 'ready\n', f'checkout holder failed before acquiring its lock: {line}'
 
     try:
-        code, out, _, result, home = _handoff(tmp_path, '-NoGateway', prepare=hold_checkout)
+        code, out, _, result, home = _handoff(
+            tmp_path, '-NoGateway', prepare=hold_checkout, HANDOFF_UPDATE_DONE=str(update_done))
         line = messages.get(timeout=30)
         try:
             deadline = float(line)
