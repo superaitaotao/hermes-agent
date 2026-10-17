@@ -76,7 +76,7 @@ jobs:
     # takes minutes and not seconds when the cache misses. `nix flake check`
     # builds 21 checks, and --max-jobs defaults to the core count. It uses the
     # wider runner with no more configuration.
-    runs-on: ubuntu-latest-32-core
+    runs-on: ${{ github.repository == 'superaitaotao/hermes-agent' && inputs.release != true && 'ubuntu-latest' || 'ubuntu-latest-32-core' }}
     timeout-minutes: 60
     steps:
       - name: Checkout code
@@ -155,7 +155,7 @@ jobs:
         # A path: flake has no git metadata, so the release source names its
         # commit with ?rev=: without it self.rev is null, the install stamp
         # carries no commit, and the packaged CLI reports "unknown".
-        run: nix flake check "${{ inputs.release == true && format('path:{0}/release-source?rev={1}', runner.temp, github.sha) || '.' }}" --print-build-logs
+        run: nix flake check "${{ inputs.release == true && format('path:{0}/release-source?rev={1}', runner.temp, github.sha) || '.' }}" --print-build-logs${{ github.repository == 'superaitaotao/hermes-agent' && inputs.release != true && ' --max-jobs 1 --cores 2' || '' }}
 
       - name: Verify release package runtime identity
         if: inputs.release == true

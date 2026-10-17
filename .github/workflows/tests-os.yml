@@ -73,7 +73,7 @@ jobs:
   os-tests:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: ${{ matrix.timeout || 30 }}
+    timeout-minutes: ${{ (github.repository == 'superaitaotao/hermes-agent' && matrix.marker == 'windows' && 75) || matrix.timeout || 30 }}
     strategy:
       fail-fast: false
       matrix:
@@ -89,10 +89,12 @@ jobs:
             marker: macos
             slice: 2/2
           - name: Windows-only tests
-            runner: windows-latest-32-core
+            runner: ${{ github.repository == 'superaitaotao/hermes-agent' && 'windows-latest' || 'windows-latest-32-core' }}
+            arch: X64
             marker: windows
           - name: Windows-only tests (arm64)
-            runner: windows-latest-32-arm-core
+            runner: ${{ github.repository == 'superaitaotao/hermes-agent' && 'windows-11-arm' || 'windows-latest-32-arm-core' }}
+            arch: ARM64
             marker: windows
             timeout: 60
     steps:
@@ -114,6 +116,26 @@ jobs:
           extras: '["all", "telegram", "anthropic", "mistral", "fal", "modal", "daytona", "parallel-web"]'
           test-environment: 'true'
           prune-python-cache: true
+
+      - name: Require native Windows test interpreter
+        if: github.repository == 'superaitaotao/hermes-agent' && matrix.marker == 'windows'
+        shell: bash
+        env:
+          EXPECTED_RUNNER_ARCH: ${{ matrix.arch }}
+        run: |
+          "$HERMES_PYTHON" - <<'PY'
+          import json, os, platform, subprocess, sys
+          expected = os.environ['EXPECTED_RUNNER_ARCH']
+          machine = platform.machine().upper()
+          print(json.dumps({'runner_os': os.environ.get('RUNNER_OS'),
+                            'runner_arch': os.environ.get('RUNNER_ARCH'),
+                            'interpreter': sys.executable, 'machine': machine,
+                            'tested_sha': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()}))
+          assert os.environ['RUNNER_OS'] == 'Windows'
+          assert os.environ['RUNNER_ARCH'] == expected
+          assert platform.system() == 'Windows'
+          assert machine in ({'ARM64', 'AARCH64'} if expected == 'ARM64' else {'AMD64', 'X86_64'})
+          PY
 
       - name: Run ${{ matrix.marker }} tests
         # scripts/run_tests.sh — the canonical runner, same as every other
@@ -187,8 +209,12 @@ jobs:
         env:
           # These files spawn nested PowerShell trees. CPU-count parallelism
           # starves cold child startup before the fixture's idle deadline.
-          HERMES_TEST_WORKERS: ${{ matrix.marker == 'windows' && (runner.arch == 'ARM64' && '16' || '16') || '' }}
+          HERMES_TEST_WORKERS: ${{ matrix.marker == 'windows' && (github.repository == 'superaitaotao/hermes-agent' && '2' || '16') || '' }}
           HERMES_TEST_SLICE: ${{ matrix.slice || '' }}
+          # The fork's 4-vCPU runners run these PowerShell-heavy files 2-3x slower
+          # than the 32-core upstream rows; upstream, other forks and macOS keep
+          # the runner's own 300 s default. Census: twohomes R attachment 2501.
+          HERMES_TEST_FILE_TIMEOUT: ${{ (github.repository == 'superaitaotao/hermes-agent' && matrix.marker == 'windows') && '900' || '' }}
           # Belt-and-suspenders with tests/conftest.py's env blanking: no
           # test may reach a real provider API.
           OPENROUTER_API_KEY: ''

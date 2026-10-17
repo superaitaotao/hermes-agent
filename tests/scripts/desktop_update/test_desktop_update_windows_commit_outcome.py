@@ -11,8 +11,10 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import queue
 import subprocess
 import sys
+import threading
 import time
 
 import pytest
@@ -67,6 +69,8 @@ def main():
                                     'outcome': outcome, 'finished_at': '2026-10-05T12:00:00+00:00'}, indent=2),
                         encoding='utf-8')
         return int(os.environ.get('HANDOFF_EXIT', '0'))
+    if os.environ.get('HANDOFF_UPDATE_DONE'):
+        Path(os.environ['HANDOFF_UPDATE_DONE']).touch()
     print('Update complete!', flush=True)
     return 0
 if __name__ == '__main__':
@@ -154,9 +158,16 @@ def test_nonzero_exit_after_the_commit_point_is_installed_with_a_followup(tmp_pa
 
 _TIMED_CHECKOUT_HOLDER = """
 import msvcrt, os, sys, time
+from pathlib import Path
+sys.path.insert(0, sys.argv[4])
+from tests.waiting import wait_until
 fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT | os.O_BINARY, 0o644)
 os.lseek(fd, 1 << 20, os.SEEK_SET)
 msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)   # hermes_cli/update_lock.py::_try_lock's byte
+print('ready', flush=True)
+done = Path(sys.argv[3])
+wait_until(done.exists, timeout=120, what='update completion before the checkout hold')
+print(time.time() + float(sys.argv[2]), flush=True)
 time.sleep(float(sys.argv[2]))
 """
 
@@ -166,12 +177,47 @@ def test_result_finished_at_is_stamped_after_the_r6_release_wait(tmp_path: Path)
     # The relaunched Desktop drops a non-manual result whose finished_at is 30 minutes old; the
     # R6 wait lasts up to 2 h. The result must carry the time the hand-off actually finished.
     holders = []
+    update_done = tmp_path / 'update-done'
 
-    def hold_checkout(_home: Path, install: Path) -> None:
-        holders.append((subprocess.Popen([sys.executable, '-c', _TIMED_CHECKOUT_HOLDER,
-                                          str(install / '.hermes-update.lock'), '25']), time.time() + 25))
+    messages = queue.Queue()
+
+    def hold_checkout(home: Path, install: Path) -> None:
+        holder = tmp_path / 'checkout_holder.py'
+        holder.write_text(_TIMED_CHECKOUT_HOLDER, encoding='utf-8')
+        proc = subprocess.Popen([sys.executable, str(holder),
+                                 str(install / '.hermes-update.lock'), '25', str(update_done), str(ROOT)],
+                                cwd=tmp_path, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        holders.append((proc, 0))
+        assert proc.stdout is not None
+        output = proc.stdout
+
+        def read_messages() -> None:
+            for line in output:
+                messages.put(line)
+
+        threading.Thread(target=read_messages, daemon=True).start()
+        try:
+            line = messages.get(timeout=30)
+        except queue.Empty:
+            pytest.fail('checkout holder did not acquire its lock within 30s')
+        assert line == 'ready\n', f'checkout holder failed before acquiring its lock: {line}'
+
     try:
-        code, out, _, result, home = _handoff(tmp_path, '-NoGateway', prepare=hold_checkout)
+        code, out, _, result, home = _handoff(
+            tmp_path, '-NoGateway', prepare=hold_checkout, HANDOFF_UPDATE_DONE=str(update_done))
+        line = messages.get(timeout=30)
+        try:
+            deadline = float(line)
+        except ValueError:
+            output = [line]
+            drain_until = time.monotonic() + 5
+            while time.monotonic() < drain_until:
+                try:
+                    output.append(messages.get(timeout=max(0.001, drain_until - time.monotonic())))
+                except queue.Empty:
+                    break
+            pytest.fail('checkout holder failed after acquiring its lock:\n' + ''.join(output))
+        holders[0] = (holders[0][0], deadline)
     finally:
         for proc, _ in holders:
             proc.kill(); proc.wait()

@@ -30,7 +30,7 @@ jobs:
     # cargo builds codegen units and test binaries in parallel across the
     # cores. This lane also builds the crate from the start when Cargo.toml
     # changes.
-    runs-on: ubuntu-latest-32-core
+    runs-on: ${{ github.repository == 'superaitaotao/hermes-agent' && 'ubuntu-latest' || 'ubuntu-latest-32-core' }}
     timeout-minutes: 30
     defaults:
       run:
@@ -73,4 +73,4 @@ jobs:
       # --lib only: the integration/bin targets would need a built frontend
       # (vite dist) that this lane deliberately does not produce.
       - name: cargo test
-        run: cargo test --lib
+        run: ${{ github.repository == 'superaitaotao/hermes-agent' && 'CARGO_BUILD_JOBS=2 cargo test --lib' || 'cargo test --lib' }}
