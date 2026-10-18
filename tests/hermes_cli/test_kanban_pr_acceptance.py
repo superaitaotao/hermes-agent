@@ -13,7 +13,8 @@ from hermes_cli.kanban_db_connect import connect
 
 @pytest.fixture
 def github(tmp_path, monkeypatch, *, db_path=None):
-    state = {"conclusion": "success", "head": "a" * 40, "reads": 0, "requests": []}
+    state = {"conclusion": "success", "head": "a" * 40, "reads": 0, "requests": [],
+             "suite": None, "suite_read_failure": False}
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
@@ -28,10 +29,21 @@ def github(tmp_path, monkeypatch, *, db_path=None):
                 value = {"name": "main", "protected": False}
             elif "/rules/branches/" in self.path:
                 value = [[]]
+            elif "/check-suites/" in self.path:
+                # A skipped job's own suite is its evidence. GitHub Actions reports the
+                # workflow run here, with its own status, conclusion, head and app.
+                if state["suite_read_failure"]:
+                    self.send_error(500)
+                    return
+                suite = state["suite"]
+                value = {"id": suite["id"], "status": suite["status"], "conclusion": suite["conclusion"],
+                         "head_sha": suite.get("head_sha", sha), "app": {"id": suite.get("app_id", 1)}}
             elif "/check-runs" in self.path:
                 run = {"id": 42, "name": "required", "head_sha": sha,
                        "app": {"id": 1}, "status": "in_progress" if state["conclusion"] == "pending" else "completed", "conclusion": state["conclusion"],
                        "html_url": "https://github.com/acme/repo/actions/runs/42"}
+                if state["suite"]:
+                    run["check_suite"] = {"id": state["suite"]["id"]}
                 if state.get("stale"):
                     run["head_sha"] = "b" * 40
                 runs = [] if state.get("missing") else [run]
@@ -140,6 +152,47 @@ def test_pr_completion_requires_current_required_evidence(github):
         local = kb.create_task(conn, title="local", completion_contract="local-only")
         assert kb.complete_task(conn, local, summary="https://github.com/acme/repo/pull/7 is background context")
         assert len(github["requests"]) == before
+
+
+# --- A skipped required check passes only inside its own proven successful suite ---
+
+SUITE_ON_HEAD = {"id": 105748385268, "status": "completed", "conclusion": "success"}
+
+# (label, suite overrides (None = the run carries no check_suite.id), classification, reaches Done, suite read attempted)
+SKIPPED_SUITE_CASES = [
+    ("successful suite on the head", {}, "success", True, True),
+    ("cancelled suite", {"conclusion": "cancelled"}, "infra", False, True),
+    ("failed suite", {"conclusion": "failure"}, "infra", False, True),
+    ("unfinished suite", {"status": "in_progress", "conclusion": None}, "pending", False, True),
+    ("suite on another head", {"head_sha": "b" * 40}, "infra", False, True),
+    ("suite from another app", {"app_id": 2}, "infra", False, True),
+    ("run without a check_suite.id", None, "infra", False, False),
+    ("unreadable suite", {"read_failure": True}, "infra", False, True),
+]
+
+
+@pytest.mark.platforms("linux")
+def test_skipped_required_check_counts_only_inside_successful_suite(github):
+    with connect() as conn:
+        for label, overrides, classification, done, read in SKIPPED_SUITE_CASES:
+            suite = None if overrides is None else {**SUITE_ON_HEAD,
+                **{k: v for k, v in overrides.items() if k != "read_failure"}}
+            github.update(conclusion="skipped", head="a" * 40, suite=suite,
+                          suite_read_failure=bool(overrides and overrides.get("read_failure")))
+            reads = sum(1 for path in github["requests"] if "/check-suites/" in path)
+            tid = kb.create_task(conn, title=label, completion_contract="acme/repo")
+            assert kb.complete_task(conn, tid, result="done",
+                metadata={"published_pr": "https://github.com/acme/repo/pull/7"}) is done, label
+            task = kb.get_task(conn, tid)
+            assert task is not None, label
+            assert (task.status == "done") is done, label
+            receipt = [json.loads(r[0]) for r in conn.execute(
+                "SELECT payload FROM task_events WHERE task_id=? AND kind='pr_acceptance'", (tid,))][-1]
+            assert receipt["classification"] == classification, (label, receipt)
+            assert receipt["ok"] is done, label
+            assert sum(1 for path in github["requests"] if "/check-suites/" in path) == reads + (1 if read else 0), label
+            if done:
+                assert receipt["checks"][0]["suite"] == SUITE_ON_HEAD
 
 
 @pytest.mark.platforms("linux")
