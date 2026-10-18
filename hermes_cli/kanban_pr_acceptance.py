@@ -104,6 +104,21 @@ def _assignee_profile_home(assignee: str | None) -> str | None:
         raise _GateAuthError(f"assignee profile {assignee!r} cannot be resolved") from None
 
 
+def _check_suite(check: dict, repo: str, profile_home: str | None, cache: dict) -> dict | None:
+    """The check suite a ``skipped`` run belongs to, read once per distinct suite id.
+
+    ``None`` means the run carries no ``check_suite.id``: there is no suite to
+    prove, so there is no read to make either. A failed read raises into
+    ``collect_acceptance``'s existing ``infra`` handler, so the lane retries
+    rather than letting the skip pass unproven."""
+    suite_id = (check.get("check_suite") or {}).get("id")
+    if suite_id is None:
+        return None
+    if suite_id not in cache:
+        cache[suite_id] = _api(f"repos/{repo}/check-suites/{suite_id}", profile_home=profile_home)
+    return cache[suite_id]
+
+
 def collect_acceptance(contract: str, published_pr: str | None,
                        assignee: str | None = None) -> dict:
     receipt = {"ok": False, "classification": "missing", "head_sha": None,
@@ -171,6 +186,7 @@ def _required_outcomes(repo, sha, required, receipt, profile_home):
     statuses = [{**s, "sha": sha} for page in _api(f"repos/{repo}/commits/{sha}/statuses?per_page=100",
                                                    paginate=True, profile_home=profile_home) for s in page]
     outcomes = []
+    suites: dict = {}
     for context, app_id in sorted(required, key=str):
         matching = [r for r in runs if r["name"] == context and
                     (app_id in (None, -1) or r["app"]["id"] == app_id)]
@@ -183,12 +199,19 @@ def _required_outcomes(repo, sha, required, receipt, profile_home):
         for check in selected:
             is_run = "conclusion" in check
             outcome = check.get("conclusion") if is_run else check["state"]
-            classification = _classify(check, sha, outcome, is_run)
+            skipped = is_run and outcome == "skipped"
+            suite = _check_suite(check, repo, profile_home, suites) if skipped else None
+            classification = _classify(check, sha, outcome, is_run, suite)
             outcomes.append(classification)
-            receipt["checks"].append({"name": context, "id": check["id"],
+            entry = {"name": context, "id": check["id"],
                 "url": check.get("html_url") or check.get("target_url"),
                 "head_sha": check.get("head_sha", check.get("sha")),
-                "classification": classification, "conclusion": outcome})
+                "classification": classification, "conclusion": outcome}
+            if skipped:
+                entry["suite"] = None if suite is None else {
+                    "id": suite.get("id"), "status": suite.get("status"),
+                    "conclusion": suite.get("conclusion")}
+            receipt["checks"].append(entry)
     return outcomes
 
 
@@ -257,9 +280,29 @@ def _same_pr_identity(current, sha, branch):
     return head == sha and base == branch and (state == "open" or current["merged"])
 
 
-def _classify(check: dict, sha: str, outcome: str | None, is_run: bool) -> str:
+def _classify_skipped(check: dict, sha: str, suite: dict | None) -> str:
+    """A ``skipped`` check run passes only inside its own proven suite (D1).
+
+    GitHub documents a skipped job as non-blocking for the required check it
+    satisfies, and the suite is what proves the skip was intended: the same
+    workflow run, completed ``success``, on this head, from this app. Nothing
+    weaker separates a docs-only skip from one inside a cancelled or failed run.
+    An unfinished suite can still conclude either way, so it stays ``pending``."""
+    if suite is None:
+        return "infra"
+    if suite.get("status") != "completed":
+        return "pending"
+    if (suite.get("head_sha") != sha or suite.get("conclusion") != "success"
+            or (suite.get("app") or {}).get("id") != (check.get("app") or {}).get("id")):
+        return "infra"
+    return "success"
+
+
+def _classify(check: dict, sha: str, outcome: str | None, is_run: bool, suite: dict | None = None) -> str:
     if check.get("head_sha", check.get("sha")) != sha:
         return "stale"
     if is_run and check.get("status") != "completed":
         return "pending"
+    if is_run and outcome == "skipped":
+        return _classify_skipped(check, sha, suite)
     return {"success": "success", "failure": "failure", "error": "infra", "pending": "pending"}.get(outcome, "infra")

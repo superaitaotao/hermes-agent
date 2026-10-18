@@ -61,7 +61,10 @@ dashboard completion. It reads classic branch protection and active ruleset
 required contexts, paginates exact-head check runs and legacy statuses, then
 re-reads the PR head/base. Optional failed/skipped telemetry does not veto accepted
 required checks. Missing, pending, failed, cancelled, timed-out, stale, skipped or
-neutral **required** evidence cannot complete the card. Unreadable, malformed or
+neutral **required** evidence cannot complete the card. A `skipped` required
+check run counts as success only when its own check suite is completed with
+conclusion `success` on the PR head and from the same app; an unfinished suite
+stays pending. Unreadable, malformed or
 incomplete policy and GitHub API failures also refuse acceptance. A null GraphQL
 classic-protection rule is not proof of absence: GitHub hides it from non-admin
 readers too. The gate corroborates null with the REST base branch and requires
