@@ -2203,10 +2203,10 @@ class TestSystemdCgroupIsolation:
             if value == "--property"
         ]
         assert "MemoryAccounting=yes" in properties
-        # systemd rejects OOMPolicy= on transient --scope units across the versions
-        # users run (239/245/249, #102486); emitting it fails the probe and every
-        # cron worker dispatch. MemoryMax + MemoryAccounting carry the isolation.
-        assert not any(p.startswith("OOMPolicy=") for p in properties), properties
+        # A kernel OOM kill of one child must not make systemd stop the whole
+        # scope (default OOMPolicy=stop), which SIGTERMs the agent with it. The
+        # probe drops the property where systemd rejects it (#102486).
+        assert "OOMPolicy=continue" in properties, properties
         memory_max = next(
             value for value in properties if value.startswith("MemoryMax=")
         )
@@ -2618,12 +2618,71 @@ class TestSystemdCgroupIsolation:
         assert first is True
         assert second is True
         assert len(probe_calls) == 1, "probe must run only once (cached)"
-        # The probe must not carry OOMPolicy= either: that is the argv systemd
-        # rejected on scope units and cached as "unavailable" (#102486).
+        # The probe carries the same OOMPolicy= the real spawns use, so a systemd
+        # that rejects it is detected here, not on the first worker (#102486).
         probe_argv = probe_calls[0][0]
-        assert not any(
-            value.startswith("OOMPolicy=") for value in probe_argv if isinstance(value, str)
-        ), probe_argv
+        assert "OOMPolicy=continue" in probe_argv, probe_argv
+
+    @pytest.mark.platforms("linux")
+    @pytest.mark.parametrize("rejects_oom_policy", [False, True], ids=["systemd>=253", "systemd<253"])
+    def test_scope_keeps_running_after_a_child_oom_kill_where_systemd_allows(
+        self, monkeypatch, rejects_oom_policy
+    ):
+        """Under systemd's default OOMPolicy=stop, one kernel OOM kill inside the
+        worker scope makes systemd stop the scope and SIGTERM the agent, so the
+        run ends with no terminal call. OOMPolicy=continue keeps the agent alive
+        to see the failed command. systemd <253 rejects the property on scope
+        units (#102486); losing it there must not cost the scope."""
+        import tools.process_registry as pr
+
+        monkeypatch.setattr(pr, "_SYSTEMD_SCOPE_AVAILABLE", None)
+        monkeypatch.setattr(pr, "_SYSTEMD_RUN_NO_EXPAND", True)
+        monkeypatch.setattr(pr, "_SYSTEMD_RUN_OOM_POLICY", True)
+        probes = []
+
+        def fake_run(argv, **kwargs):
+            probes.append(argv)
+            if rejects_oom_policy and "OOMPolicy=continue" in argv:
+                return subprocess.CompletedProcess(
+                    argv, 1, stderr=b"Unknown assignment: OOMPolicy=continue")
+            return subprocess.CompletedProcess(argv, 0, stderr=b"")
+
+        monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/systemd-run")
+        monkeypatch.setattr("subprocess.run", fake_run)
+
+        assert pr._systemd_run_user_scope_available() is True
+        spawn = pr._build_systemd_scope_argv(["bash", "-c", "true"], unit_suffix="t")
+        assert ("OOMPolicy=continue" in spawn) is not rejects_oom_policy
+        assert "--expand-environment=no" in spawn
+        assert spawn[spawn.index("--") + 1:] == ["bash", "-c", "true"]
+        assert len(probes) == (2 if rejects_oom_policy else 1)
+
+    @pytest.mark.platforms("linux")
+    def test_scope_probe_drops_both_unsupported_options_on_old_systemd(self, monkeypatch):
+        """systemd <253 rejects OOMPolicy= and systemd <254 rejects
+        --expand-environment=no; each rejection drops only its own option."""
+        import tools.process_registry as pr
+
+        monkeypatch.setattr(pr, "_SYSTEMD_SCOPE_AVAILABLE", None)
+        monkeypatch.setattr(pr, "_SYSTEMD_RUN_NO_EXPAND", True)
+        monkeypatch.setattr(pr, "_SYSTEMD_RUN_OOM_POLICY", True)
+
+        def fake_run(argv, **kwargs):
+            if "--expand-environment=no" in argv:
+                return subprocess.CompletedProcess(
+                    argv, 1, stderr=b"systemd-run: unrecognized option '--expand-environment=no'")
+            if "OOMPolicy=continue" in argv:
+                return subprocess.CompletedProcess(
+                    argv, 1, stderr=b"Unknown assignment: OOMPolicy=continue")
+            return subprocess.CompletedProcess(argv, 0, stderr=b"")
+
+        monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/systemd-run")
+        monkeypatch.setattr("subprocess.run", fake_run)
+
+        assert pr._systemd_run_user_scope_available() is True
+        spawn = pr._build_systemd_scope_argv(["bash"], unit_suffix="t")
+        assert "OOMPolicy=continue" not in spawn
+        assert "--expand-environment=no" not in spawn
 
     @pytest.mark.platforms("linux")
     @pytest.mark.parametrize("rejects_no_expand", [False, True], ids=["systemd>=254", "systemd<254"])
