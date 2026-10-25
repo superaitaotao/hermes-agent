@@ -11,6 +11,7 @@ import contextlib
 import json
 import os
 import shlex
+import sqlite3
 import sys
 import time
 from pathlib import Path
@@ -206,7 +207,7 @@ def _profile_author() -> str:
 
 
 _DELEGATED_CHILD_DENIED_ACTIONS: frozenset[str] = frozenset({
-    "init", "create", "swarm", "assign", "reclaim", "reassign", "link", "unlink",
+    "init", "create", "swarm", "assign", "reclaim", "reassign", "bind-project", "link", "unlink",
     "claim", "comment", "attach", "attach-rm", "complete", "edit", "block",
     "schedule", "unblock", "promote", "archive", "dispatch", "daemon", "repair",
     "heartbeat", "notify-subscribe", "notify-unsubscribe", "specify", "decompose",
@@ -603,6 +604,47 @@ def _cmd_reclaim(args: argparse.Namespace) -> int:
         ok = kb.reclaim_task(conn, args.task_id, reason=getattr(args, "reason", None))
     return _ok_or_err(ok, f"cannot reclaim {args.task_id} (not running or unknown id)",
                       f"Reclaimed {args.task_id}")
+
+
+def _cmd_bind_project(args: argparse.Namespace) -> int:
+    """Operator-only repair: bind an unstarted null-linked card to its project."""
+    from hermes_cli import kanban_project_binding as kpb
+
+    actor = (getattr(args, "actor", None) or _profile_author() or "").strip()
+    try:
+        with kbc.connect_closing() as conn:
+            result = kpb.bind_project(
+                conn, task_id=args.task_id, project=args.project,
+                expected_workspace=args.expected_workspace,
+                expected_branch_null=bool(args.expected_branch_null),
+                reason=args.reason, actor=actor, board=kb.get_current_board(),
+                dry_run=bool(args.dry_run),
+            )
+    except kpb.BindingRefused as exc:
+        if getattr(args, "json", False):
+            _print_json(kpb.refusal_result(exc, task_id=args.task_id))
+        return _err(f"kanban bind-project: {exc}")
+    except sqlite3.Error as exc:
+        return _err(f"kanban bind-project: {exc}")
+    if getattr(args, "json", False):
+        _print_json(result)
+        return 0
+    print(_format_binding(result))
+    return 0
+
+
+def _format_binding(result: dict) -> str:
+    """Human rendering of an applied/dry-run/replayed binding."""
+    new = result["new"]
+    lines = [
+        f"{result['status']}: {result['task_id']} -> {new['project_id']} on {result['board']}",
+        f"  workspace  {new['workspace_path']}",
+        f"  branch     {new['branch_name']}",
+    ]
+    receipt = result.get("receipt")
+    if receipt:
+        lines.append(f"  receipt    {receipt['event']} event {receipt['event_id']}")
+    return "\n".join(lines)
 
 
 def _cmd_reassign(args: argparse.Namespace) -> int:
@@ -1322,6 +1364,7 @@ _HANDLERS = {
     "list": _cmd_list, "ls": _cmd_list, "show": _cmd_show,
     "assign": _cmd_assign, "set-model": _cmd_set_model,
     "reclaim": _cmd_reclaim, "reassign": _cmd_reassign,
+    "bind-project": _cmd_bind_project,
     "diagnostics": _cmd_diagnostics, "diag": _cmd_diagnostics,
     "link": _cmd_link, "unlink": _cmd_unlink, "claim": _cmd_claim,
     "comment": _cmd_comment, "attach": _cmd_attach,
