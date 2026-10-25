@@ -110,7 +110,8 @@ def _kpb():
 
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess:
     return subprocess.run(
-        ["git", "-C", str(repo), *args], capture_output=True, text=True, check=True, timeout=60,
+        ["git", "-C", str(repo), *args], capture_output=True, text=True, encoding="utf-8",
+        errors="replace", check=True, timeout=60,
     )
 
 
@@ -585,7 +586,8 @@ def _run_hermes(home: Path, *args: str) -> subprocess.CompletedProcess:
     env["PYTHONPATH"] = str(ROOT) + os.pathsep + env.get("PYTHONPATH", "")
     return subprocess.run(
         [sys.executable, "-m", "hermes_cli.main", *args],
-        cwd=ROOT, env=env, capture_output=True, text=True, check=False, timeout=180,
+        cwd=ROOT, env=env, capture_output=True, text=True, encoding="utf-8",
+        errors="replace", check=False, timeout=180,
     )
 
 

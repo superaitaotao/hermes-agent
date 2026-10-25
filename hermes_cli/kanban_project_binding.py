@@ -382,7 +382,8 @@ def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess:
     try:
         return subprocess.run(
             ["git", "-C", str(cwd), *args],
-            capture_output=True, text=True, timeout=_GIT_TIMEOUT_SECONDS, check=False,
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=_GIT_TIMEOUT_SECONDS, check=False,
         )
     except (OSError, subprocess.SubprocessError) as exc:
         return subprocess.CompletedProcess(
