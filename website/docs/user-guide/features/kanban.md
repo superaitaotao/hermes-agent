@@ -445,6 +445,44 @@ parent, missing input, unmet capability) before unblocking, or raise
 `BLOCK_RECURRENCE_LIMIT` if the loop is expected.
 :::
 
+### Repairing a card that lost its project link
+
+A project lives in the creating profile's `projects.db`. When a card is created
+across profiles (an orchestrator on one profile, its project on another) the
+lookup finds nothing and the link is dropped silently: the card keeps an
+unstarted `todo` status, `project_id` and `branch_name` stay empty, and its
+worktree anchor is the repository root instead of `<repo>/.worktrees/<id>`.
+Re-creating the card would lose its id, edges, history and approvals, so bind
+it in place:
+
+```bash
+hermes -p <project-owning-profile> kanban --board <board> bind-project <task-id> \
+    --project <project-id> \
+    --expected-workspace /path/to/repo \
+    --expected-branch-null \
+    --reason "<plan digest + authorizing card>"
+```
+
+Add `--dry-run --json` first: it reports the binding it would write and touches
+nothing. The command is operator-only by design — there is no tool, dashboard
+or create-time equivalent. It writes exactly one row update plus one
+`project_bound` event carrying the old/new `project_id`/`workspace_path`/
+`branch_name` triple, the canonical project store it read, the actor and the
+reason, so a later reader can tell an audited repair from a normal create.
+
+It derives the target itself — `<primary_path>/.worktrees/<task-id>` and the
+deterministic `<project-slug>/<task-id>-<title-slug>` branch — and refuses,
+changing nothing, when the card is not an unstarted unclaimed `todo` worktree
+card, when its anchor is not exactly the canonical project root, when any pid it
+ever recorded is still running (or its liveness cannot be inspected), when the
+project is unknown, archived, scoped to another board or lacks a primary path,
+when the repository root cannot be proven, when the target directory or branch
+already exists, or when the board dispatch lock cannot be held for the whole
+write. Re-running the identical command returns the durable receipt instead of
+writing a second event; a card that already matches the binding but carries no
+receipt is refused rather than adopted. The command never creates the worktree
+and never changes status, so the worker still creates it on first claim.
+
 ## Enabling tools for a chat profile
 
 The Desktop Kanban plugin displays the board; it does not grant the chat agent
