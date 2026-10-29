@@ -1,9 +1,11 @@
 """Two lifecycle invariants, using real SQLite and a local GitHub HTTP contract."""
+import argparse
 import json
 import os
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 
 import pytest
 
@@ -420,3 +422,94 @@ def test_assigned_card_with_unresolvable_profile_is_auth_not_ambient(tmp_path, m
             "SELECT payload FROM task_events WHERE task_id=? AND kind='pr_acceptance'", (tid,)).fetchone()[0])
     assert receipt["classification"] == "auth"
     assert "'ghost'" in receipt["detail"] and "cannot be resolved" in receipt["detail"]
+
+
+# --- Completion retention rides the same acceptance gate, through the real CLI ---
+
+
+def _cli_kanban(*argv: str) -> int:
+    """Drive ``hermes kanban ...`` exactly as the shell entry point parses it."""
+    from hermes_cli import kanban as kc
+
+    parser = argparse.ArgumentParser(prog="hermes", add_help=False)
+    kc.build_parser(parser.add_subparsers(dest="command"))
+    return kc.kanban_command(parser.parse_args(list(argv)))
+
+
+def _ready_scratch_card(conn, title: str) -> "tuple[str, Path]":
+    """An eligible PR card in ``ready`` with a managed scratch workspace on disk."""
+    tid = kb.create_task(conn, title=title, completion_contract="acme/repo")
+    ws = Path(kb.workspaces_root()) / tid
+    ws.mkdir(parents=True)
+    (ws / "receipt.txt").write_text("kept", encoding="utf-8")
+    with kb.write_txn(conn):
+        conn.execute(
+            "UPDATE tasks SET status='ready', workspace_kind='scratch', workspace_path=? "
+            "WHERE id=?",
+            (str(ws), tid),
+        )
+    return tid, ws
+
+
+def _events(conn, tid: str, kind: str) -> "list[dict]":
+    return [json.loads(r[0]) for r in conn.execute(
+        "SELECT payload FROM task_events WHERE task_id=? AND kind=? ORDER BY id", (tid, kind))]
+
+
+@pytest.mark.platforms("linux")
+def test_cli_retained_completion_records_acceptance_hold_and_audit(github):
+    """AC1/AC2 via the supported CLI: Done, exact-head acceptance, the durable
+    hold and its audit record land in one completion; the bytes stay."""
+    with connect() as conn:
+        tid, ws = _ready_scratch_card(conn, "retain and complete")
+    github.update(conclusion="success", head="a" * 40)
+    rc = _cli_kanban(
+        "kanban", "complete", tid, "--retain-workspace", "--summary", "shipped",
+        "--metadata", json.dumps({"published_pr": "https://github.com/acme/repo/pull/7"}),
+    )
+    assert rc == 0
+    with connect() as conn:
+        task = kb.get_task(conn, tid)
+        receipt = _events(conn, tid, "pr_acceptance")[-1]
+        hold = _events(conn, tid, "workspace_retained")
+    assert task is not None and task.status == "done" and task.workspace_retained is True
+    assert receipt["ok"] is True and receipt["head_sha"] == "a" * 40
+    assert len(hold) == 1
+    assert hold[0]["path"] == str(ws.resolve())
+    assert hold[0]["reason"] == "explicit_completion_retention"
+    assert hold[0]["workspace_kind"] == "scratch"
+    assert (ws / "receipt.txt").read_text(encoding="utf-8") == "kept"
+
+
+@pytest.mark.platforms("linux")
+@pytest.mark.parametrize(
+    ("label", "overrides", "published_pr"),
+    [
+        pytest.param("failed-check", {"conclusion": "failure"},
+                     "https://github.com/acme/repo/pull/7", id="failed-check"),
+        pytest.param("stale-head", {"stale": True},
+                     "https://github.com/acme/repo/pull/7", id="stale-head"),
+        pytest.param("foreign-publication", {},
+                     "https://github.com/other/repo/pull/7", id="foreign-publication"),
+    ],
+)
+def test_cli_retained_completion_refuses_without_recording_a_hold(
+    github, label, overrides, published_pr
+):
+    """AC4: a refused completion records neither the hold nor the completion, so
+    the card keeps its workspace on the pre-completion terms."""
+    github.update({"conclusion": "success", "head": "a" * 40, "stale": False, **overrides})
+    with connect() as conn:
+        tid, ws = _ready_scratch_card(conn, label)
+    rc = _cli_kanban(
+        "kanban", "complete", tid, "--retain-workspace", "--summary", "shipped",
+        "--metadata", json.dumps({"published_pr": published_pr}),
+    )
+    assert rc == 1
+    with connect() as conn:
+        task = kb.get_task(conn, tid)
+        assert task is not None
+        assert task.status == "ready" and task.workspace_retained is False
+        assert _events(conn, tid, "workspace_retained") == []
+        assert _events(conn, tid, "completed") == []
+    assert (ws / "receipt.txt").is_file()

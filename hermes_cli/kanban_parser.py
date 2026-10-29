@@ -303,6 +303,10 @@ _SPECS = [
         _arg("--force", action="store_true",
              help="Override the live-claim guard: complete a running, claimed task "
                   "even without owning its run (closes the worker's run)."),
+        _arg("--retain-workspace", action="store_true",
+             help="Keep the card's workspace as a durable hold: skip completion "
+                  "cleanup now and in every later sweep (archive, deferred parent "
+                  "cleanup, gc). Recorded on the card and in the event log."),
     ], help="Mark one or more tasks done"),
     _cmd("edit", [
         _TASK_ID,

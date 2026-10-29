@@ -19,6 +19,7 @@ _TASK_DICT_FIELDS = (
     "created_by", "created_at", "started_at", "completed_at", "result",
     "skills", "max_runtime_seconds", "max_retries", "model_override", "provider_override",
     "session_id", "workflow_template_id", "current_step_key", "completion_contract", "last_failure_error",
+    "workspace_retained",
 )
 _SHOW_RUN_FIELDS = (
     "id", "profile", "step_key", "status", "outcome", "summary", "error",
@@ -29,6 +30,12 @@ _RUNS_RUN_FIELDS = (
     "summary", "error", "metadata", "worker_pid", "step_key",
 )
 _ATTACHMENT_FIELDS = ("id", "filename", "content_type", "size", "uploaded_by", "stored_path", "created_at")
+
+
+def _workspace_field(task: kb.Task) -> str:
+    """One-line workspace summary: kind, pinned path, and any durable retention hold."""
+    text = f"{task.workspace_kind}" + (f" @ {task.workspace_path}" if task.workspace_path else "")
+    return f"{text} (retained)" if task.workspace_retained else text
 
 
 def _fmt_ts(ts: Optional[int]) -> str:

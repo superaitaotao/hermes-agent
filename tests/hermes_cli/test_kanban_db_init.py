@@ -14,7 +14,7 @@ def _make_legacy_db(path: Path) -> None:
     additive-column migration runs cleanly on top.
     """
     conn = sqlite3.connect(str(path))
-    conn.executescript(kb.SCHEMA_SQL)
+    conn.executescript(kbc.SCHEMA_SQL)
     conn.executescript(
         """
         DROP TABLE task_events;
@@ -121,6 +121,26 @@ def test_migration_is_idempotent(tmp_path, monkeypatch):
         id_col = {r["name"]: r for r in conn.execute("PRAGMA table_info(task_events)")}["id"]
         assert id_col["type"].upper() == "INTEGER"
         assert len(conn.execute("SELECT * FROM task_events").fetchall()) == 2
+
+
+def test_legacy_board_gains_the_workspace_retention_column(tmp_path, monkeypatch):
+    """A board written before ``workspace_retained`` existed opens as legacy:
+    the column is added NOT NULL DEFAULT 0, existing rows read 0, and retention
+    stays off, so every cleanup path keeps the pre-column behaviour."""
+    db_path = _setup_home(tmp_path, monkeypatch)
+    _make_legacy_db(db_path)
+    raw = sqlite3.connect(str(db_path))
+    try:
+        raw.execute("ALTER TABLE tasks DROP COLUMN workspace_retained")
+        raw.commit()
+    finally:
+        raw.close()
+
+    with kbc.connect(db_path) as conn:
+        col = {r["name"]: r for r in conn.execute("PRAGMA table_info(tasks)")}["workspace_retained"]
+        assert col["notnull"] == 1 and str(col["dflt_value"]) == "0"
+        assert conn.execute("SELECT workspace_retained FROM tasks").fetchone()["workspace_retained"] == 0
+        assert kb.get_task(conn, "task-1").workspace_retained is False
 
 
 

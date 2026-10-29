@@ -89,3 +89,28 @@ def test_request_review_shares_the_live_worker_fence(conn):
     ok, reason = kb.request_review(conn, tid2, summary="steal", with_reason=True)
     assert ok is False and "live claim" in reason
     assert kb.request_review(conn, tid2, summary="own", expected_run_id=run2) is True
+
+
+def _retention_events(conn, task_id: str) -> int:
+    return conn.execute(
+        "SELECT count(*) FROM task_events WHERE task_id = ? AND kind = 'workspace_retained'",
+        (task_id,),
+    ).fetchone()[0]
+
+
+def test_retained_completion_refuses_a_foreign_live_claim_without_a_hold(conn):
+    """A foreign live claim refuses inside the completion transaction, so no
+    retention hold or audit row is left behind and the worker's run stays open."""
+    tid, run_id = _claimed_running_task(conn)
+
+    with pytest.raises(kb.LiveClaimError):
+        kb.complete_task(conn, tid, result="not mine", retain_workspace=True)
+
+    assert kb.get_task(conn, tid).workspace_retained is False
+    assert _retention_events(conn, tid) == 0
+    assert conn.execute("SELECT ended_at FROM task_runs WHERE id = ?", (run_id,)).fetchone()["ended_at"] is None
+    # The owning worker can still complete its own card and record the hold.
+    assert kb.complete_task(conn, tid, result="mine", expected_run_id=run_id,
+                            retain_workspace=True) is True
+    assert kb.get_task(conn, tid).workspace_retained is True
+    assert _retention_events(conn, tid) == 1
