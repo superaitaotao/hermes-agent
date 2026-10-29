@@ -11,6 +11,8 @@ remote-tracking ref. Any doubt preserves the worktree.
 
 from __future__ import annotations
 
+import argparse
+import json
 import subprocess
 from pathlib import Path
 
@@ -19,6 +21,7 @@ import pytest
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_workspace as kbw
 from hermes_cli import kanban_db_connect as kbc
+from hermes_cli import kanban_ops
 
 
 def _git(*args: str, cwd: str | None = None) -> str:
@@ -355,3 +358,144 @@ def test_terminal_scratch_parent_still_swept_after_last_child(
         assert ws.is_dir()  # live child still needs the handoff files
         assert kb.archive_task(conn, child)
     assert not ws.exists()
+
+
+# ---------------------------------------------------------------------------
+# Retention: an explicit completion hold outlives every cleanup sweep
+# ---------------------------------------------------------------------------
+
+
+def _ship_worktree(wt: Path) -> tuple[Path, str]:
+    """Push a commit from *wt* and leave an ignored artifact; returns (artifact, tip).
+
+    The tree stays clean, so the legacy teardown would remove this worktree —
+    which is what makes it a fair retention case rather than a dirty-tree one.
+    """
+    (wt / ".gitignore").write_text("build/\n", encoding="utf-8")
+    _git("-C", str(wt), "add", ".gitignore")
+    _git("-C", str(wt), "commit", "-m", "chore: ignore build output")
+    _git("-C", str(wt), "push", "-u", "origin", "HEAD")
+    artifact = wt / "build" / "report.bin"
+    artifact.parent.mkdir()
+    artifact.write_bytes(b"\x00build-output\xff")
+    return artifact, _git("-C", str(wt), "rev-parse", "HEAD").strip()
+
+
+def _retained_events(conn, tid: str) -> list[dict]:
+    return [
+        e.payload or {} for e in kb.list_events(conn, tid)
+        if e.kind == "workspace_retained"
+    ]
+
+
+def _worktree_registered(repo: Path, wt: Path) -> bool:
+    listed = _git("-C", str(repo), "worktree", "list", "--porcelain")
+    return f"worktree {wt.resolve()}" in listed
+
+
+def test_retained_completion_keeps_the_pushed_worktree(
+    kanban_home: Path, repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC1/AC2: the hold, its audit record and the completion commit together,
+    and the clean pushed worktree keeps its bytes, registration and branch tip."""
+    monkeypatch.setenv("HERMES_PROFILE", "retention-probe")
+    with kbc.connect_closing() as conn:
+        tid, wt = _worktree_task(conn, repo)
+        artifact, tip = _ship_worktree(wt)
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status='ready' WHERE id=?", (tid,))
+        assert kb.claim_task(conn, tid, claimer="worker") is not None
+        assert kb.complete_task(conn, tid, summary="shipped", retain_workspace=True)
+
+        task = kb.get_task(conn, tid)
+        assert task is not None
+        assert task.status == "done" and task.workspace_retained is True
+        holds = _retained_events(conn, tid)
+        run_metadata = json.loads(conn.execute(
+            "SELECT metadata FROM task_runs WHERE task_id=? AND ended_at IS NOT NULL "
+            "ORDER BY id DESC LIMIT 1", (tid,),
+        ).fetchone()["metadata"])
+
+    assert len(holds) == 1
+    assert holds[0] == {
+        "reason": "explicit_completion_retention",
+        "workspace_kind": "worktree",
+        "path": str(wt.resolve()),
+        "branch": f"wt/{tid}",
+        "head": tip,
+        "actor": "retention-probe",
+    }
+    assert run_metadata["workspace_retained"] is True
+    assert wt.is_dir() and _worktree_registered(repo, wt)
+    assert _git("-C", str(wt), "rev-parse", "HEAD").strip() == tip
+    assert artifact.read_bytes() == b"\x00build-output\xff"
+    assert _branch_exists(repo, f"wt/{tid}")
+
+
+def test_retained_worktree_survives_archive_and_gc(
+    kanban_home: Path, repo: Path
+) -> None:
+    """AC3: archive and gc are the later sweeps that used to win; the hold
+    outranks both."""
+    args = argparse.Namespace(event_retention_days=30, log_retention_days=30)
+    with kbc.connect_closing() as conn:
+        tid, wt = _worktree_task(conn, repo)
+        artifact, tip = _ship_worktree(wt)
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status='ready' WHERE id=?", (tid,))
+        assert kb.claim_task(conn, tid, claimer="worker") is not None
+        assert kb.complete_task(conn, tid, summary="shipped", retain_workspace=True)
+        assert kb.archive_task(conn, tid)
+    assert kanban_ops._cmd_gc(args) == 0
+    assert wt.is_dir() and _worktree_registered(repo, wt)
+    assert _git("-C", str(wt), "rev-parse", "HEAD").strip() == tip
+    assert artifact.read_bytes() == b"\x00build-output\xff"
+    assert _branch_exists(repo, f"wt/{tid}")
+
+
+def test_retained_parent_worktree_survives_the_last_child(
+    kanban_home: Path, repo: Path
+) -> None:
+    """AC3: the deferred parent sweep skips a retained parent, so the last child
+    going terminal cannot remove the parent's worktree."""
+    with kbc.connect_closing() as conn:
+        parent, parent_wt = _worktree_task(conn, repo, title="retained parent")
+        artifact, tip = _ship_worktree(parent_wt)
+        child = kb.create_task(conn, title="child", assignee="worker")
+        kb.link_tasks(conn, parent, child)
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status='ready' WHERE id=?", (parent,))
+        assert kb.claim_task(conn, parent, claimer="worker") is not None
+        assert kb.complete_task(conn, parent, summary="parent done", retain_workspace=True)
+        assert parent_wt.is_dir()
+
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status='ready' WHERE id=?", (child,))
+        assert kb.claim_task(conn, child, claimer="worker") is not None
+        assert kb.complete_task(conn, child, summary="child done")
+    assert parent_wt.is_dir() and _worktree_registered(repo, parent_wt)
+    assert _git("-C", str(parent_wt), "rev-parse", "HEAD").strip() == tip
+    assert artifact.read_bytes() == b"\x00build-output\xff"
+    assert _branch_exists(repo, f"wt/{parent}")
+
+
+def test_repeat_completion_cannot_clear_a_retention_hold(
+    kanban_home: Path, repo: Path
+) -> None:
+    """AC5: a terminal card cannot be completed again, so repetition can neither
+    clear the hold nor reach cleanup."""
+    with kbc.connect_closing() as conn:
+        tid, wt = _worktree_task(conn, repo)
+        artifact, _tip = _ship_worktree(wt)
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status='ready' WHERE id=?", (tid,))
+        assert kb.claim_task(conn, tid, claimer="worker") is not None
+        assert kb.complete_task(conn, tid, summary="shipped", retain_workspace=True)
+
+        assert kb.complete_task(conn, tid, summary="again") is False
+        assert kb.complete_task(conn, tid, summary="forced", force=True) is False
+        task = kb.get_task(conn, tid)
+        assert task is not None and task.workspace_retained is True
+        assert len(_retained_events(conn, tid)) == 1
+    assert wt.is_dir() and _worktree_registered(repo, wt)
+    assert artifact.read_bytes() == b"\x00build-output\xff"

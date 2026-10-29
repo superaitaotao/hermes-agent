@@ -221,3 +221,69 @@ def test_cleanup_workspace_keeps_scratch_when_other_boards_cannot_be_listed(boar
         kbw._cleanup_workspace(conn, archived)
         assert _deferred_reasons(conn, archived) == ["shared", "shared", "unknown"]
     assert (shared / "note.txt").read_text(encoding="utf-8") == "still needed"
+
+
+# ---------------------------------------------------------------------------
+# A completion retention hold outranks gc and the shared-path guard
+# ---------------------------------------------------------------------------
+
+
+def _retained_scratch(conn) -> tuple[str, Path]:
+    """A card that completed with ``retain_workspace`` and was archived after."""
+    from hermes_cli import kanban_db_workspace as kbw
+
+    tid = kb.create_task(conn, title="retained scratch", assignee="worker")
+    assert kb.claim_task(conn, tid) is not None
+    task = kb.get_task(conn, tid)
+    assert task is not None
+    ws = Path(kbw.resolve_workspace(task))
+    kbw.set_workspace_path(conn, tid, ws)
+    (ws / "evidence.txt").write_text("retained", encoding="utf-8")
+    assert kb.complete_task(conn, tid, summary="shipped", retain_workspace=True)
+    assert kb.archive_task(conn, tid)
+    return tid, ws
+
+
+def test_cmd_gc_keeps_a_workspace_the_card_retained(board):
+    """gc is the last sweep that could remove an archived card's scratch dir; the
+    hold skips it (the unretained control is ``positive-collects`` above)."""
+    with kbc.connect_closing() as conn:
+        tid, ws = _retained_scratch(conn)
+        task = kb.get_task(conn, tid)
+        assert task is not None and task.workspace_retained is True
+    assert kanban_ops._cmd_gc(_args()) == 0
+    assert (ws / "evidence.txt").read_text(encoding="utf-8") == "retained"
+
+
+@pytest.mark.parametrize("holder_board", [None, "other"], ids=["same-board", "sibling-board"])
+def test_retained_terminal_card_holds_its_path_against_another_cards_cleanup(
+    board, holder_board
+):
+    """A retained terminal row is a holder even though it is terminal: another
+    card pointing at the same directory must defer, across boards too."""
+    from hermes_cli import kanban_db_workspace as kbw
+
+    shared = kb.workspaces_root() / f"retained-{holder_board or 'same'}"
+    shared.mkdir(parents=True)
+    (shared / "note.txt").write_text("retained", encoding="utf-8")
+    if holder_board:
+        kb.create_board(holder_board)
+    with kbc.connect_closing(board=holder_board) as conn:
+        holder = kb.create_task(conn, title="retained holder")
+    with kbc.connect_closing(board=holder_board) as conn, kb.write_txn(conn):
+        conn.execute(
+            "UPDATE tasks SET status='done', workspace_kind='scratch', workspace_path=?, "
+            "workspace_retained=1 WHERE id=?",
+            (str(shared), holder),
+        )
+    with kbc.connect_closing() as conn:
+        archived = kb.create_task(conn, title="archived sharer")
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET status='archived', workspace_kind='scratch', "
+                "workspace_path=? WHERE id=?",
+                (str(shared), archived),
+            )
+        kbw._cleanup_workspace(conn, archived)
+        assert _deferred_reasons(conn, archived) == ["shared"]
+    assert (shared / "note.txt").read_text(encoding="utf-8") == "retained"
