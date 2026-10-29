@@ -441,6 +441,12 @@ def test_retained_worktree_survives_archive_and_gc(
     with kbc.connect_closing() as conn:
         tid, wt = _worktree_task(conn, repo)
         artifact, tip = _ship_worktree(wt)
+        attachment = kb.store_attachment_bytes(
+            conn, tid, "receipt.txt", b"\x00attachment\xff", uploaded_by="probe",
+        )
+        blob = Path(conn.execute(
+            "SELECT stored_path FROM task_attachments WHERE id = ?", (attachment,),
+        ).fetchone()["stored_path"])
         with kb.write_txn(conn):
             conn.execute("UPDATE tasks SET status='ready' WHERE id=?", (tid,))
         assert kb.claim_task(conn, tid, claimer="worker") is not None
@@ -450,6 +456,7 @@ def test_retained_worktree_survives_archive_and_gc(
     assert wt.is_dir() and _worktree_registered(repo, wt)
     assert _git("-C", str(wt), "rev-parse", "HEAD").strip() == tip
     assert artifact.read_bytes() == b"\x00build-output\xff"
+    assert blob.read_bytes() == b"\x00attachment\xff"
     assert _branch_exists(repo, f"wt/{tid}")
 
 
