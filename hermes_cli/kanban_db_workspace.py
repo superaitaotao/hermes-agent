@@ -58,10 +58,36 @@ _WORKSPACE_HOLD_SQL = (
     f"(status NOT IN {_TERMINAL_STATUSES_SQL} OR COALESCE(workspace_retained, 0) = 1)"
 )
 
+# Same holder test for a board that predates the retention column (see
+# :func:`_workspace_hold_sql`): without the column there can be no retained row,
+# so only the status test applies.
+_LEGACY_WORKSPACE_HOLD_SQL = f"(status NOT IN {_TERMINAL_STATUSES_SQL})"
+
 _WORKSPACE_ROW_SQL = (
     "SELECT workspace_kind, workspace_path, branch_name, workspace_retained "
     "FROM tasks WHERE id = ?"
 )
+
+
+def _workspace_hold_sql(conn: sqlite3.Connection) -> str:
+    """Holder predicate for the board behind *conn*.
+
+    ``workspace_retained`` arrives with the additive migration, but a sibling
+    board is inspected through a raw read-only connection
+    (:func:`_other_board_uses_path`) and is never migrated, so a board last
+    written by an older Hermes has no such column. Selecting it there fails with
+    "no such column", and because the caller cannot tell a live holder from an
+    unreadable board it would refuse every cleanup while that idle board exists.
+    A schema without the column holds no retained rows at all, so its holder
+    test is the status test alone and the retention clause stays on this board.
+
+    A board whose ``tasks`` table is missing or unreadable keeps raising below,
+    so the caller still treats it as unknown rather than assuming it is free.
+    """
+    for column in conn.execute("PRAGMA table_info(tasks)"):
+        if column[1] == "workspace_retained":
+            return _WORKSPACE_HOLD_SQL
+    return _LEGACY_WORKSPACE_HOLD_SQL
 
 
 def _git(repo_root: Path, *args: str, timeout: int) -> subprocess.CompletedProcess:
@@ -98,27 +124,32 @@ def _is_terminal_task(conn: sqlite3.Connection, task_id: str) -> bool:
     return conn.execute(_TERMINAL_TASK_SQL, (task_id,)).fetchone() is not None
 
 
-_OTHER_LIVE_PATHS_SQL = (
-    "SELECT workspace_path FROM tasks "
-    "WHERE id != ? AND workspace_path IS NOT NULL "
-    f"AND {_WORKSPACE_HOLD_SQL}"
-)
-# Sibling boards mint their own ids, so the id being cleaned up here can
-# name a different live task there. Do not exclude it.
-_ANY_LIVE_PATHS_SQL = (
-    "SELECT workspace_path FROM tasks "
-    "WHERE workspace_path IS NOT NULL "
-    f"AND {_WORKSPACE_HOLD_SQL}"
-)
+def _other_live_paths_sql(hold_sql: str) -> str:
+    return (
+        "SELECT workspace_path FROM tasks "
+        "WHERE id != ? AND workspace_path IS NOT NULL "
+        f"AND {hold_sql}"
+    )
+
+
+def _any_live_paths_sql(hold_sql: str) -> str:
+    # Sibling boards mint their own ids, so the id being cleaned up here can
+    # name a different live task there. Do not exclude it.
+    return (
+        "SELECT workspace_path FROM tasks "
+        "WHERE workspace_path IS NOT NULL "
+        f"AND {hold_sql}"
+    )
 
 
 def _conn_uses_path(
     conn: sqlite3.Connection, task_id: str, key: str, *, exclude_task_id: bool = True
 ) -> bool:
+    hold_sql = _workspace_hold_sql(conn)
     if exclude_task_id:
-        rows = conn.execute(_OTHER_LIVE_PATHS_SQL, (task_id,)).fetchall()
+        rows = conn.execute(_other_live_paths_sql(hold_sql), (task_id,)).fetchall()
     else:
-        rows = conn.execute(_ANY_LIVE_PATHS_SQL).fetchall()
+        rows = conn.execute(_any_live_paths_sql(hold_sql)).fetchall()
     for row in rows:
         other = row["workspace_path"]
         if not other:
@@ -184,8 +215,10 @@ def _workspace_in_use_by_other(
     ``workspace_path`` as soon as one of its tasks went terminal. Compare the
     resolved path: a row may store ``~`` or a symlinked spelling. A terminal row
     that completed with a retention hold still counts as a holder
-    (``_WORKSPACE_HOLD_SQL``), so neither this board nor a sibling board can
-    delete a directory another card was told would be kept.
+    (:func:`_workspace_hold_sql`), so neither this board nor a sibling board can
+    delete a directory another card was told would be kept. A sibling board
+    whose schema predates that column has no retained rows by definition and is
+    read with the status test alone, so an idle old board cannot freeze cleanup.
 
     The connection covers one board. A ready task on a named board can point
     at the same directory. If that set of databases cannot be read, refuse
