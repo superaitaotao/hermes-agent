@@ -225,6 +225,11 @@ def test_unreadable_schema_without_cli_names_the_sqlite3_requirement(
     import hermes_cli.session_lost_and_found as laf
 
     monkeypatch.setattr(laf, "find_sqlite3_cli", lambda: None)
+    # Pin the refusal too: `find_sqlite3_cli_refusal()` reports what the host's
+    # sqlite3 CLI told the real probe, and a runner image shipping a
+    # WAL-reset-vulnerable build takes the other refusal branch, so leaving it
+    # live made this host-dependent test assert against the wrong message.
+    monkeypatch.setattr(laf, "find_sqlite3_cli_refusal", lambda: {"reason": "missing"})
     with pytest.raises(SessionRecoverySourceError) as excinfo:
         recover_session_database(
             source,

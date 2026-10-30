@@ -1546,7 +1546,7 @@ def test_connect_heals_reduced_tasks_schema_seeded_by_external_harness(kanban_ho
         assert healed <= cols
         # Healed DDL matches the fresh schema (NOT NULL DEFAULT 'scratch' etc.).
         fresh = sqlite3.connect(":memory:")
-        fresh.executescript(kb.SCHEMA_SQL)
+        fresh.executescript(kbc.SCHEMA_SQL)
         fresh_info = {r[1]: r[2:] for r in fresh.execute("PRAGMA table_info(tasks)")}
         healed_info = {r["name"]: tuple(r)[2:] for r in conn.execute("PRAGMA table_info(tasks)")}
         assert {c: healed_info[c] for c in healed} == {c: fresh_info[c] for c in healed}

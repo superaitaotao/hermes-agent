@@ -26,7 +26,7 @@ from hermes_cli import kanban_workflow
 from hermes_cli.kanban_output import (
     _ATTACHMENT_FIELDS, _RUNS_RUN_FIELDS, _SHOW_RUN_FIELDS, _bulk_apply, _err,
     _fmt_counts, _fmt_task_line, _fmt_ts, _json_out, _obj_dict, _print_json,
-    _task_to_dict,
+    _task_to_dict, _workspace_field,
 )
 from hermes_cli.kanban_boards import _dispatch_boards
 from hermes_cli.kanban_ops import (
@@ -508,7 +508,7 @@ def _cmd_show(args: argparse.Namespace) -> int:
     field("assignee", task.assignee or "-")
     if task.tenant:
         field("tenant", task.tenant)
-    field("workspace", f"{task.workspace_kind}" + (f" @ {task.workspace_path}" if task.workspace_path else ""))
+    field("workspace", _workspace_field(task))
     if task.branch_name:
         field("branch", task.branch_name)
     if task.skills:
@@ -907,6 +907,8 @@ def _cmd_complete(args: argparse.Namespace) -> int:
     metadata, rc = _parse_metadata_flag(raw_meta)
     if rc:
         return rc
+    retain_workspace = bool(getattr(args, "retain_workspace", False))
+    retained_suffix = " (workspace retained)" if retain_workspace else ""
     fail_msg: dict[str, str] = {}
     with kbc.connect_closing() as conn:
         def op(tid):
@@ -921,7 +923,8 @@ def _cmd_complete(args: argparse.Namespace) -> int:
             try:
                 done = kb.complete_task(conn, tid, result=args.result, summary=summary, metadata=metadata,
                                         expected_run_id=_worker_run_id_for(tid),
-                                        force=bool(getattr(args, "force", False)))
+                                        force=bool(getattr(args, "force", False)),
+                                        retain_workspace=retain_workspace)
             except kb.LiveClaimError:
                 fail_msg[tid] = (f"cannot complete {tid}: a live worker is running it. Wait for the "
                                  f"worker, `hermes kanban reclaim {tid}` to release it, or re-run with "
@@ -941,7 +944,7 @@ def _cmd_complete(args: argparse.Namespace) -> int:
                                      f"complete the parents first, or `hermes kanban unlink <parent> {tid}`.")
             return done
 
-        return _bulk_apply(ids, op, lambda tid: f"Completed {tid}", fail_msg.__getitem__)
+        return _bulk_apply(ids, op, lambda tid: f"Completed {tid}{retained_suffix}", fail_msg.__getitem__)
 
 
 def _cmd_edit(args: argparse.Namespace) -> int:

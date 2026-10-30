@@ -18,6 +18,7 @@ import threading
 import time
 from dataclasses import dataclass
 from dataclasses import field
+from hermes_cli.kanban_db_schema import SCHEMA_SQL
 from hermes_cli.sqlite_util import add_column_if_missing as _add_column_if_missing
 from pathlib import Path
 from typing import Any
@@ -776,7 +777,7 @@ def connect(db_path: Optional[Path] = None, *, board: Optional[str] = None) -> s
             # Idempotent; runs under _INIT_LOCK so same-process dispatcher
             # threads can't race the ALTER TABLE pass with stale PRAGMA snapshots.
             if resolved not in _INITIALIZED_PATHS:
-                conn.executescript(_kb.SCHEMA_SQL)
+                conn.executescript(SCHEMA_SQL)
                 _migrate_add_optional_columns(conn)
                 _INITIALIZED_PATHS.add(resolved)
 
@@ -887,6 +888,8 @@ _LATER_TASK_COLUMNS = (
     ("block_recurrences", "block_recurrences INTEGER NOT NULL DEFAULT 0"),
     # Spawn-time start fingerprint of worker_pid (PID-reuse guard; NULL = legacy row).
     ("worker_started_at", "worker_started_at INTEGER"),
+    # Durable hold set by ``complete --retain-workspace`` (see SCHEMA_SQL).
+    ("workspace_retained", "workspace_retained INTEGER NOT NULL DEFAULT 0"),
 )
 
 _NOTIFY_SUB_COLUMNS = (
