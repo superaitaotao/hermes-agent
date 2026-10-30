@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import shutil
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -287,3 +288,81 @@ def test_retained_terminal_card_holds_its_path_against_another_cards_cleanup(
         kbw._cleanup_workspace(conn, archived)
         assert _deferred_reasons(conn, archived) == ["shared"]
     assert (shared / "note.txt").read_text(encoding="utf-8") == "retained"
+
+
+def _legacy_sibling_board(slug: str, *, workspace: Path | None = None) -> Path:
+    """A sibling board as an install that never ran the retention migration has it.
+
+    Built through the supported writer (which adds ``workspace_retained``) and
+    then stripped of that column through a raw connection, which is the state a
+    board reaches when the runtime that last touched it predates the column.
+    Cleanup only ever reads such a board through a raw read-only connection, so
+    it stays unmigrated.
+    """
+    kb.create_board(slug)
+    with kbc.connect_closing(board=slug) as conn:
+        holder = kb.create_task(conn, title=f"{slug} task")
+        if workspace is not None:
+            with kb.write_txn(conn):
+                conn.execute(
+                    "UPDATE tasks SET status='ready', workspace_kind='scratch', "
+                    "workspace_path=? WHERE id=?",
+                    (str(workspace), holder),
+                )
+    db = kb.boards_root() / slug / "kanban.db"
+    with sqlite3.connect(db) as raw:
+        raw.execute("ALTER TABLE tasks DROP COLUMN workspace_retained")
+    return db
+
+
+@pytest.mark.parametrize(
+    ("sibling", "expected_reasons", "kept"),
+    [
+        pytest.param("legacy-idle", [], False, id="legacy-board-no-holder"),
+        pytest.param("legacy-holder", ["shared"], True, id="legacy-board-live-holder"),
+        pytest.param("malformed", ["unknown"], True, id="malformed-board"),
+    ],
+)
+def test_cleanup_decides_from_a_sibling_board_without_the_retention_column(
+    board, sibling, expected_reasons, kept
+):
+    """A pre-upgrade sibling board is read, not refused.
+
+    It has no ``workspace_retained`` column, so it can hold no retained row: its
+    live holders still defer the delete, an idle one must not block legacy
+    deletion, and a board that cannot be read at all still fails closed.
+    """
+    from hermes_cli import kanban_db_workspace as kbw
+
+    shared = kb.workspaces_root() / f"mixed-schema-{sibling}"
+    shared.mkdir(parents=True)
+    (shared / "note.txt").write_text("payload", encoding="utf-8")
+    if sibling == "malformed":
+        db = kb.boards_root() / "malformed" / "kanban.db"
+        db.parent.mkdir(parents=True)
+        db.write_bytes(b"not a sqlite database\x00\xff")
+    else:
+        db = _legacy_sibling_board(
+            sibling, workspace=shared if sibling == "legacy-holder" else None
+        )
+        columns = [r[1] for r in sqlite3.connect(db).execute("PRAGMA table_info(tasks)")]
+        assert "workspace_retained" not in columns
+
+    with kbc.connect_closing() as conn:
+        archived = kb.create_task(conn, title="archived sharer")
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET status='archived', workspace_kind='scratch', "
+                "workspace_path=? WHERE id=?",
+                (str(shared), archived),
+            )
+        kbw._cleanup_workspace(conn, archived)
+        assert _deferred_reasons(conn, archived) == expected_reasons
+
+    assert shared.is_dir() is kept
+    if kept:
+        assert (shared / "note.txt").read_text(encoding="utf-8") == "payload"
+    if sibling != "malformed":
+        # The shared-path scan reads the sibling read-only: it must not migrate it.
+        columns = [r[1] for r in sqlite3.connect(db).execute("PRAGMA table_info(tasks)")]
+        assert "workspace_retained" not in columns
