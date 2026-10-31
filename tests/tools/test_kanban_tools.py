@@ -195,6 +195,50 @@ def test_complete_happy_path(worker_env):
         conn.close()
 
 
+def test_complete_top_level_published_pr_is_folded_into_metadata(worker_env):
+    """PR-backed workers get a first-class published_pr argument instead of
+    having to discover a magic key inside free-form metadata."""
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+    from tools import kanban_tools as kt
+
+    pr = "https://github.com/acme/repo/pull/7"
+    out = json.loads(kt._handle_complete({
+        "summary": "review approved",
+        "published_pr": pr,
+    }))
+    assert out["ok"] is True
+
+    with kbc.connect_closing() as conn:
+        run = kb.latest_run(conn, worker_env)
+        assert run.metadata["published_pr"] == pr
+
+
+def test_complete_rejects_conflicting_published_pr_sources(worker_env):
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+    from tools import kanban_tools as kt
+
+    out = json.loads(kt._handle_complete({
+        "summary": "review approved",
+        "published_pr": "https://github.com/acme/repo/pull/7",
+        "metadata": {"published_pr": "https://github.com/acme/repo/pull/8"},
+    }))
+    assert "conflicts with metadata.published_pr" in out.get("error", "")
+
+    with kbc.connect_closing() as conn:
+        assert kb.get_task(conn, worker_env).status == "running"
+
+
+def test_complete_schema_surfaces_published_pr():
+    from tools.kanban_tools_schemas import KANBAN_COMPLETE_SCHEMA
+
+    props = KANBAN_COMPLETE_SCHEMA["parameters"]["properties"]
+    assert props["published_pr"]["type"] == "string"
+    assert "metadata.published_pr" in props["published_pr"]["description"]
+    assert "PR URL" in props["published_pr"]["description"]
+
+
 def test_complete_retry_with_empty_created_cards_succeeds(worker_env):
     """After a phantom rejection, retrying kanban_complete with
     created_cards=[] (the documented escape hatch) must complete the
