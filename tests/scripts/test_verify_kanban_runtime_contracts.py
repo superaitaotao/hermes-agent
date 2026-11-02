@@ -2,6 +2,7 @@
 from pathlib import Path
 import subprocess
 import sys
+import json
 
 import pytest
 
@@ -67,3 +68,56 @@ def test_runtime_child_refuses_pending_completion_without_repair(tmp_path):
     assert "Pending runtime obligation" in result.stderr
     assert marker.read_text(encoding="utf-8") == "owed"
     assert sorted(p.name for p in tmp_path.iterdir()) == before
+
+
+def test_settlement_stops_on_real_owed_restart_before_readiness(tmp_path, monkeypatch):
+    from scripts import kanban_update_rehearsal as rehearsal
+    from hermes_cli.update_host_obligation import host_obligation_path, write_host_obligation
+
+    root = Path(__file__).resolve().parents[2]
+    home = tmp_path / "home"
+    profile = home / ".hermes/profiles/probe"
+    profile.mkdir(parents=True)
+    (profile / "config.yaml").write_text("model: harmless-probe\n")
+    (profile / "gateway_state.json").write_text(json.dumps({"gateway_state": "running", "pid": 4194297}))
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("HERMES_HOME", str(home / ".hermes"))
+    monkeypatch.setenv("HERMES_GATEWAY_LOCK_DIR", str(tmp_path / "locks"))
+    sha = git(root, "rev-parse", "HEAD")
+    assert write_host_obligation(expected_sha=sha)
+    marker = host_obligation_path()
+    original = marker.read_bytes()
+    (tmp_path / "evidence").mkdir()
+    trial = rehearsal.Trial(tmp_path, root)
+    monkeypatch.setattr(trial, "preflight", lambda **kw: {})
+    monkeypatch.setattr(trial, "python", lambda: [sys.executable])
+
+    def local_argv(_trial, _runner, command):
+        command = [str(arg).replace("/runner/", str(root) + "/").replace("/trial/checkout", str(root)) for arg in command]
+        launcher = str(root / ".hermes/bin/hermes")
+        if launcher in command:
+            index = command.index(launcher)
+            command[index:index + 1] = [sys.executable, "-B", "-m", "hermes_cli.main"]
+        return ["env", "-u", "HERMES_KANBAN_TASK", "-u", "HERMES_KANBAN_DB", *command]
+
+    monkeypatch.setattr(rehearsal, "sandbox_argv", local_argv)
+    real_run = trial.run
+
+    def run(label, argv, **kwargs):
+        if label == "actual-update":
+            return tmp_path / "evidence/unneeded-update.log"
+        return real_run(label, argv, **kwargs)
+
+    monkeypatch.setattr(trial, "run", run)
+
+    def forbidden_readback(*args):
+        pytest.fail("Readiness must not run with an owed restart")
+
+    monkeypatch.setattr(trial, "readback", forbidden_readback)
+    with pytest.raises(ValueError, match="Settlement left runtime obligations"):
+        trial.update(sha)
+    assert marker.read_bytes() == original
+    settlement = next(phase["settlement"] for phase in trial.phases if phase["phase"] == "settlement")
+    assert settlement["exit_code"] == 0, next(Path(phase["log"]).read_text() for phase in trial.phases if phase["phase"] == "settlement")
+    assert settlement["after"][0]["exists"] is True
+    assert settlement["before"][0]["sha256"] == settlement["after"][0]["sha256"]

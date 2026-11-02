@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 from pathlib import Path
 import shutil
@@ -89,6 +90,19 @@ def namespace_preflight(helpers=False):
     return report
 
 
+def restart_records(source):
+    sys.path.insert(0, str(source))
+    from pm.environments import activate_dependencies
+    activate_dependencies(source)
+    from hermes_cli.update_host_obligation import _owed_path, PROFILE_MARKER_NAME
+    from hermes_cli.update_receipt import _profile_homes
+
+    paths = [_owed_path(), *(home / PROFILE_MARKER_NAME for _, home in _profile_homes())]
+    return [{"path": str(path), "exists": path.exists() or path.is_symlink(),
+             "sha256": hashlib.sha256(path.read_bytes()).hexdigest() if path.exists() else None}
+            for path in paths]
+
+
 class Trial:
     def __init__(self, root, runner):
         self.root = root
@@ -128,6 +142,24 @@ class Trial:
             raise ValueError("Bootstrap interpreter escaped trial")
         return [executable]
 
+    def restart_snapshot(self):
+        log = self.run("restart-records", self.python() + ["-B", "/runner/scripts/kanban_update_rehearsal.py",
+                            "--restart-records", "/trial/checkout"], manual=True)
+        return json.loads(log.read_text(encoding="utf-8-sig"))
+
+    def settle(self, before=None):
+        before = self.restart_snapshot() if before is None else before
+        self.run("settlement", ["/trial/checkout/.hermes/bin/hermes", "config", "path"], manual=True, check=False)
+        phase = self.phases[-1]
+        after = self.restart_snapshot()
+        receipt = {"before": before, "exit_code": phase["exit_code"], "after": after,
+                   "ok": phase["exit_code"] == 0 and not any(row["exists"] for row in after)}
+        phase["settlement"] = receipt
+        (self.root / "evidence/phases.json").write_text(json.dumps(self.phases, indent=2), encoding="utf-8")
+        if not receipt["ok"]:
+            raise ValueError("Settlement left runtime obligations or failed")
+        return receipt
+
     def prepare(self, sha, baseline=False):
         git(self.root / "checkout", "switch", "--detach", sha)
         self.preflight()
@@ -136,8 +168,12 @@ class Trial:
         self.run("publish-launchers", python + ["-I", "-B", "/trial/checkout/hermes_cli/_launchers.py", "/trial/checkout/.hermes/bin"], manual=True)
         for command in ("doctor", "status"):
             self.run("pm-" + command, ["/trial/checkout/.hermes/bin/hermes", "pm", command], manual=True)
+        records = self.restart_snapshot()
+        settlement = self.settle(records) if any(row["exists"] for row in records) else None
         self.preflight(helpers=True)
-        return self.readback(sha, baseline)
+        report = self.readback(sha, baseline)
+        report["settlement"] = settlement
+        return report
 
     def readback(self, sha, baseline=False):
         source_identity(self.root / "checkout", sha)
@@ -168,7 +204,9 @@ class Trial:
     def update(self, sha):
         scope = self.preflight(helpers=True)
         self.run("actual-update", ["/trial/checkout/.hermes/bin/hermes", "update", "--no-gateway-restart"])
+        settlement = self.settle()
         report = self.readback(sha)
+        report["settlement"] = settlement
         report["scope"] = scope
         return report
 
@@ -237,4 +275,5 @@ def rehearse(options):
 
 if __name__ == "__main__":
     sys.path.insert(0, str(ROOT))
-    print(json.dumps(namespace_preflight("--helpers" in sys.argv), indent=2))
+    report = restart_records(Path(sys.argv[sys.argv.index("--restart-records") + 1])) if "--restart-records" in sys.argv else namespace_preflight("--helpers" in sys.argv)
+    print(json.dumps(report, indent=2))
