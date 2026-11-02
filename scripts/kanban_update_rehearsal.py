@@ -178,7 +178,7 @@ class Trial:
     def readback(self, sha, baseline=False):
         source_identity(self.root / "checkout", sha)
         argv = self.python() + ["-B", "/runner/scripts/verify_kanban_runtime_contracts.py", "--runtime-ready",
-                               "--source", "/trial/checkout", "--expected-sha", sha]
+                               "--source", "/trial/checkout", "--expected-sha", sha, "--selection-only"]
         if baseline:
             argv += ["--allow-baseline-contract-gaps"]
         log = self.run("runtime-readiness", argv, manual=True)
