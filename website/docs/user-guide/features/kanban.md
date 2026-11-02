@@ -52,8 +52,12 @@ Declare PR work at creation with `--completion-contract OWNER/REPO` (or an exact
 accepts the same `completion_contract`. Use `local-only` for intentionally local
 work; existing and undeclared cards retain that default. Prose URLs are not policy.
 
-After publishing, pass `metadata.published_pr` to completion. The first matching
-URL binds the card permanently; retries cannot substitute a green sibling PR.
+After publishing, pass the exact PR URL via `kanban_complete.published_pr`.
+Legacy callers may still use `metadata.published_pr`. If both fields are present,
+they must match. Conflicting values return an error before any board write.
+The tool stores one canonical `metadata.published_pr` value without changing the
+caller's metadata. The first matching URL binds the card permanently; retries
+cannot substitute a green sibling PR.
 CLI `show --json` and `kanban_show` expose the persisted contract.
 
 The shared `complete_task` boundary covers worker tools, CLI, review approval and
