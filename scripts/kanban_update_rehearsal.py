@@ -27,6 +27,9 @@ def sandbox_argv(trial, runner, command):
     argv += ["--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp", "--tmpfs", "/run",
              "--tmpfs", "/home", "--bind", str(trial), "/trial", "--ro-bind", str(runner), "/runner",
              "--clearenv"]
+    resolver = Path("/etc/resolv.conf").resolve()
+    if resolver.is_relative_to("/run"):
+        argv += ["--ro-bind", str(resolver), str(resolver)]
     for key, value in trial_environment().items():
         argv += ["--setenv", key, value]
     return argv + ["--chdir", "/trial/checkout", "--", *command]
