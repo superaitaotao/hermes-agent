@@ -70,6 +70,7 @@ def test_runtime_child_refuses_pending_completion_without_repair(tmp_path):
     assert sorted(p.name for p in tmp_path.iterdir()) == before
 
 
+@pytest.mark.platforms("posix")
 def test_settlement_stops_on_real_owed_restart_before_readiness(tmp_path, monkeypatch):
     from scripts import kanban_update_rehearsal as rehearsal
     from hermes_cli.update_host_obligation import host_obligation_path, write_host_obligation
