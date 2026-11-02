@@ -94,7 +94,8 @@ def test_settlement_stops_on_real_owed_restart_before_readiness(tmp_path, monkey
     monkeypatch.setattr(trial, "python", lambda: [sys.executable])
 
     def local_argv(_trial, _runner, command):
-        command = [str(arg).replace("/runner/", str(root) + "/").replace("/trial/checkout", str(root)) for arg in command]
+        command = [str(root / str(arg).removeprefix("/runner/")) if str(arg).startswith("/runner/")
+                   else str(arg).replace("/trial/checkout", str(root)) for arg in command]
         launcher = str(root / ".hermes/bin/hermes")
         if launcher in command:
             index = command.index(launcher)
