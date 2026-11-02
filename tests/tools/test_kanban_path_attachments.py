@@ -142,7 +142,29 @@ def test_growing_file_is_rejected_after_bounded_read(board, tmp_path, monkeypatc
     path.write_bytes(b"small")
     before = snapshot()
     original = os.fstat
+    fdopen = os.fdopen
     visits = []
+    reads = []
+
+    class ObservedFile:
+        def __init__(self, fd, mode):
+            self.file = fdopen(fd, mode)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            self.file.close()
+
+        def fileno(self):
+            return self.file.fileno()
+
+        def read(self, size=-1):
+            reads.append(size)
+            assert size == kb.KANBAN_ATTACHMENT_MAX_BYTES + 1
+            return self.file.read(size)
+
+    monkeypatch.setattr(os, "fdopen", ObservedFile)
 
     def grow_on_stat(fd):
         stat = original(fd)
@@ -157,6 +179,7 @@ def test_growing_file_is_rejected_after_bounded_read(board, tmp_path, monkeypatc
     assert "limit" in result.get("error", ""), result
     assert snapshot() == before
     assert visits, "the opened file must be checked, not a pre-open Path stat"
+    assert reads == [kb.KANBAN_ATTACHMENT_MAX_BYTES + 1]
 
 
 def test_namespace_is_refused_before_any_resolution(board, monkeypatch):
