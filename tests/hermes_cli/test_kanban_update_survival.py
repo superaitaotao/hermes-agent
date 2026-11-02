@@ -34,7 +34,6 @@ print(json.dumps({'metadata_open':c['properties']['metadata'].get('additionalPro
 
 @pytest.mark.parametrize("selection", ["main", "stable", "unpatched-main"])
 def test_actual_update_preserves_contracts_only_on_patched_fork_main(releases, monkeypatch, selection):
-    root = Path(__file__).resolve().parents[2]
     import copy
     from tools.kanban_tools_schemas import KANBAN_ATTACH_SCHEMA, KANBAN_COMPLETE_SCHEMA
 

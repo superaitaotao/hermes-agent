@@ -65,6 +65,8 @@ def namespace_preflight(helpers=False):
                              for name in ("mnt", "pid", "ipc", "user", "cgroup")}}
     if helpers:
         sys.path.insert(0, "/trial/checkout")
+        from pm.environments import activate_dependencies
+        activate_dependencies(Path("/trial/checkout"))
         from hermes_constants import get_default_hermes_root
         from hermes_cli.update_receipt import _profile_homes
         from hermes_cli.update_fleet_scope import update_scope_homes, home_in_update_scope

@@ -96,6 +96,8 @@ def source_identity(source, expected):
 
 def select_source(source):
     sys.path.insert(0, str(source))
+    from pm.environments import activate_dependencies
+    activate_dependencies(source)
     module = importlib.import_module("tools.kanban_tools")
     if Path(module.__file__).resolve() != source / "tools/kanban_tools.py":
         raise ValueError("Tool imported from another source")
