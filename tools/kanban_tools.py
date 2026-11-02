@@ -983,18 +983,64 @@ def _store_attachment(board, tid, filename, data, content_type) -> str:
         return _ok(task_id=tid, attachment_id=att_id, size=len(data))
 
 
+def _read_attach_path(path_arg: str, filename_arg) -> tuple[bytes, str]:
+    """Read a local file for ``kanban_attach(path=...)`` -> ``(data, filename)``.
+
+    The read happens in Hermes, so it applies ``read_file``'s denylist: a path
+    attach must never copy a credential store onto a board attachment."""
+    from pathlib import Path
+    from agent.file_safety import get_read_block_error
+    from hermes_cli import kanban_db as _kb
+    import stat
+
+    blocked = get_read_block_error(path_arg)
+    _check(not blocked, f"path refused: {blocked}")
+    src = Path(path_arg)
+    _check(src.is_absolute(), "path must be absolute on the Hermes tool process host, "
+           "not the remote terminal backend")
+    target = src.resolve(strict=True)
+    blocked = get_read_block_error(str(target))
+    _check(not blocked, f"path refused: {blocked}")
+    _check(stat.S_ISREG(target.stat().st_mode), "path is not a readable regular file")
+    # Nonblocking open prevents a swapped-in FIFO from hanging the worker.
+    flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(target, flags)
+    with os.fdopen(fd, "rb") as stream:
+        opened = os.fstat(stream.fileno())
+        _check(stat.S_ISREG(opened.st_mode), "path is not a readable regular file")
+        cap = _kb.KANBAN_ATTACHMENT_MAX_BYTES
+        limit_error = f"attachment exceeds {cap // (1024 * 1024)} MB limit"
+        _check(opened.st_size <= cap, limit_error)
+        data = stream.read(cap + 1)
+        _check(len(data) <= cap and os.fstat(stream.fileno()).st_size <= cap, limit_error)
+    filename = str(filename_arg or "").strip() or src.name
+    return data, filename
+
+
 @_kanban_handler("kanban_attach")
 def _handle_attach(args: dict, **kw) -> str:
-    """Attach an inline (base64) file to a task."""
+    """Attach a file to a task from a local ``path`` (read server-side,
+    byte-exact) or inline ``content_base64``.
+
+    ``path`` exists because models that hand-produce base64 for a file
+    corrupt it once it passes a few KB (truncation, flipped bytes), so
+    binary evidence silently arrives broken."""
     tid = _worker_guard("kanban_attach", args)
-    filename = _require_text(args, "filename")
-    content_b64 = _require_text(args, "content_base64")
-    import base64
-    import binascii
-    try:
-        data = base64.b64decode(str(content_b64), validate=True)
-    except (binascii.Error, ValueError) as e:
-        raise _Reject(f"content_base64 is not valid base64: {e}")
+    path_arg = args.get("path")
+    content_b64 = args.get("content_base64")
+    has_path = bool(path_arg and str(path_arg).strip())
+    has_b64 = bool(content_b64 and str(content_b64).strip())
+    _check(has_path != has_b64, "pass exactly one of path or content_base64 (prefer path)")
+    if has_path:
+        data, filename = _read_attach_path(str(path_arg).strip(), args.get("filename"))
+    else:
+        filename = _require_text(args, "filename")
+        import base64
+        import binascii
+        try:
+            data = base64.b64decode(str(content_b64), validate=True)
+        except (binascii.Error, ValueError) as e:
+            raise _Reject(f"content_base64 is not valid base64: {e} (pass path= instead)")
     return _store_attachment(args.get("board"), tid, filename, data, args.get("content_type"))
 
 

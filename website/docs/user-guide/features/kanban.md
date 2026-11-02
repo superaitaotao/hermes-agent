@@ -279,11 +279,16 @@ body and hoping it finds them.
   last reference is removed). From the CLI, `hermes kanban attach-rm
   ATTACHMENT_ID` removes an attachment the same way.
 
-:::note Remote terminal backends
-Attachment paths resolve directly on the **local** terminal backend, which
-is the default for Kanban workers. If you run workers on a remote backend
-(Docker, Modal), mount the board's `attachments/` directory into the
-sandbox so the absolute paths in the worker context are reachable.
+Agents upload byte-exact files with `kanban_attach(path="/absolute/evidence.bin")`.
+The path must be absolute on the **Hermes tool process host**, not the terminal
+backend. Exactly one nonblank `path` or `content_base64` is required. Path uploads
+default to the source basename; a `filename` override has directory components
+stripped. Base64 callers must supply `filename`. Both forms share the 25 MiB cap.
+Permitted symlinks must lead to regular files allowed by the shared file-read
+guard. Missing files, directories, devices, protected targets and oversize files
+are refused without storing an attachment. File reads are bounded to the cap
+plus one byte, including when a source grows during the read.
+
 :::
 
 
