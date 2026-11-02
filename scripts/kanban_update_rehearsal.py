@@ -93,7 +93,8 @@ class Trial:
     def __init__(self, root, runner):
         self.root = root
         self.runner = runner
-        self.phases = []
+        ledger = root / "evidence/phases.json"
+        self.phases = json.loads(ledger.read_text(encoding="utf-8-sig")) if ledger.exists() else []
 
     def run(self, label, argv, *, manual=False, check=True):
         command = list(argv)

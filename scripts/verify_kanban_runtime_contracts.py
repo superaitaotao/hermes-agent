@@ -116,8 +116,8 @@ def schema_contracts(source, allow_gaps=False):
     checks = {"metadata_open": complete["properties"]["metadata"].get("additionalProperties") is True,
               "published_pr": "published_pr" in complete["properties"],
               "path": "path" in attach["properties"] and not attach.get("required")}
-    if not all(checks.values()) and not allow_gaps:
-        raise ValueError("Kanban schema contracts absent")
+    if (allow_gaps and any(checks.values())) or (not allow_gaps and not all(checks.values())):
+        raise ValueError("Unexpected Kanban schema contract state")
     return {"contracts": checks, "sanitized_schemas": schemas,
             "tool_source": str(source / "tools/kanban_tools.py")}
 
@@ -204,8 +204,13 @@ def runtime_ready(source, expected, allow_gaps=False, child=False):
 
     for _, module, attribute in STARTUP_IMPORTS:
         getattr(importlib.import_module(module), attribute)
-    for name in _UPDATE_CRITICAL_MODULES:
-        importlib.import_module(name)
+    argv = sys.argv
+    try:
+        sys.argv = ["hermes", "update"]
+        for name in _UPDATE_CRITICAL_MODULES:
+            importlib.import_module(name)
+    finally:
+        sys.argv = argv
     pending(source)
     return {"ready": True, "selected_environment": str(selected_venv(source)),
             "interpreter": sys.executable, "dependency_stamp_current": True,
