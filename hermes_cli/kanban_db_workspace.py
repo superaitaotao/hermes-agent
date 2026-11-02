@@ -49,7 +49,45 @@ _ACTIVE_CHILDREN_SQL = (
     "LIMIT 1"
 )
 
-_WORKSPACE_ROW_SQL = "SELECT workspace_kind, workspace_path, branch_name FROM tasks WHERE id = ?"
+# A row holds its workspace while it is non-terminal, and permanently once it
+# completed with an explicit retention hold (``complete --retain-workspace``).
+# Any cleanup deciding whether a directory is still spoken for must count a
+# retained terminal row as a holder, or it deletes the evidence of a card that
+# was told the workspace was kept.
+_WORKSPACE_HOLD_SQL = (
+    f"(status NOT IN {_TERMINAL_STATUSES_SQL} OR COALESCE(workspace_retained, 0) = 1)"
+)
+
+# Same holder test for a board that predates the retention column (see
+# :func:`_workspace_hold_sql`): without the column there can be no retained row,
+# so only the status test applies.
+_LEGACY_WORKSPACE_HOLD_SQL = f"(status NOT IN {_TERMINAL_STATUSES_SQL})"
+
+_WORKSPACE_ROW_SQL = (
+    "SELECT workspace_kind, workspace_path, branch_name, workspace_retained "
+    "FROM tasks WHERE id = ?"
+)
+
+
+def _workspace_hold_sql(conn: sqlite3.Connection) -> str:
+    """Holder predicate for the board behind *conn*.
+
+    ``workspace_retained`` arrives with the additive migration, but a sibling
+    board is inspected through a raw read-only connection
+    (:func:`_other_board_uses_path`) and is never migrated, so a board last
+    written by an older Hermes has no such column. Selecting it there fails with
+    "no such column", and because the caller cannot tell a live holder from an
+    unreadable board it would refuse every cleanup while that idle board exists.
+    A schema without the column holds no retained rows at all, so its holder
+    test is the status test alone and the retention clause stays on this board.
+
+    A board whose ``tasks`` table is missing or unreadable keeps raising below,
+    so the caller still treats it as unknown rather than assuming it is free.
+    """
+    for column in conn.execute("PRAGMA table_info(tasks)"):
+        if column[1] == "workspace_retained":
+            return _WORKSPACE_HOLD_SQL
+    return _LEGACY_WORKSPACE_HOLD_SQL
 
 
 def _git(repo_root: Path, *args: str, timeout: int) -> subprocess.CompletedProcess:
@@ -86,27 +124,32 @@ def _is_terminal_task(conn: sqlite3.Connection, task_id: str) -> bool:
     return conn.execute(_TERMINAL_TASK_SQL, (task_id,)).fetchone() is not None
 
 
-_OTHER_LIVE_PATHS_SQL = (
-    "SELECT workspace_path FROM tasks "
-    "WHERE id != ? AND workspace_path IS NOT NULL "
-    f"AND status NOT IN {_TERMINAL_STATUSES_SQL}"
-)
-# Sibling boards mint their own ids, so the id being cleaned up here can
-# name a different live task there. Do not exclude it.
-_ANY_LIVE_PATHS_SQL = (
-    "SELECT workspace_path FROM tasks "
-    "WHERE workspace_path IS NOT NULL "
-    f"AND status NOT IN {_TERMINAL_STATUSES_SQL}"
-)
+def _other_live_paths_sql(hold_sql: str) -> str:
+    return (
+        "SELECT workspace_path FROM tasks "
+        "WHERE id != ? AND workspace_path IS NOT NULL "
+        f"AND {hold_sql}"
+    )
+
+
+def _any_live_paths_sql(hold_sql: str) -> str:
+    # Sibling boards mint their own ids, so the id being cleaned up here can
+    # name a different live task there. Do not exclude it.
+    return (
+        "SELECT workspace_path FROM tasks "
+        "WHERE workspace_path IS NOT NULL "
+        f"AND {hold_sql}"
+    )
 
 
 def _conn_uses_path(
     conn: sqlite3.Connection, task_id: str, key: str, *, exclude_task_id: bool = True
 ) -> bool:
+    hold_sql = _workspace_hold_sql(conn)
     if exclude_task_id:
-        rows = conn.execute(_OTHER_LIVE_PATHS_SQL, (task_id,)).fetchall()
+        rows = conn.execute(_other_live_paths_sql(hold_sql), (task_id,)).fetchall()
     else:
-        rows = conn.execute(_ANY_LIVE_PATHS_SQL).fetchall()
+        rows = conn.execute(_any_live_paths_sql(hold_sql)).fetchall()
     for row in rows:
         other = row["workspace_path"]
         if not other:
@@ -170,7 +213,12 @@ def _workspace_in_use_by_other(
 
     ``gc``, completion and deferred parent cleanup used to ``rmtree`` a shared
     ``workspace_path`` as soon as one of its tasks went terminal. Compare the
-    resolved path: a row may store ``~`` or a symlinked spelling.
+    resolved path: a row may store ``~`` or a symlinked spelling. A terminal row
+    that completed with a retention hold still counts as a holder
+    (:func:`_workspace_hold_sql`), so neither this board nor a sibling board can
+    delete a directory another card was told would be kept. A sibling board
+    whose schema predates that column has no retained rows by definition and is
+    read with the status test alone, so an idle old board cannot freeze cleanup.
 
     The connection covers one board. A ready task on a named board can point
     at the same directory. If that set of databases cannot be read, refuse
@@ -217,7 +265,7 @@ def _defer_shared_workspace_cleanup(
     if reason == "shared":
         _kb._log.warning(
             "Deferring workspace cleanup for task %s: %s is still used by "
-            "another non-terminal task",
+            "another task that holds it (live, or retained at completion)",
             task_id, path,
         )
     else:
@@ -359,15 +407,76 @@ def _is_managed_scratch_path(p: Path) -> bool:
     return _managed_scratch_path_info(p)[0]
 
 
+RETENTION_REASON = "explicit_completion_retention"
+
+
+def _canonical_workspace_path(path: Path | str) -> str:
+    """Absolute, symlink-resolved spelling of *path*; the stored path when it cannot be resolved."""
+    try:
+        return str(Path(path).expanduser().resolve(strict=False))
+    except OSError:
+        return str(Path(path).expanduser())
+
+
+def _workspace_head(path: Optional[str]) -> Optional[str]:
+    """``git rev-parse HEAD`` of the workspace, or None when it is not a checkout."""
+    if not path:
+        return None
+    return _kb._git_out(Path(path).expanduser(), "rev-parse", "HEAD")
+
+
+def workspace_retention_record(conn: sqlite3.Connection, task_id: str) -> dict:
+    """Audit facts for an explicit completion retention of *task_id* (read-only).
+
+    Called BEFORE the completion transaction so the ``git`` HEAD read never runs
+    under ``BEGIN IMMEDIATE``. It describes the row completion is about to make
+    terminal; a concurrent workspace rewrite is the same lost race completion
+    does not adjudicate anywhere else.
+    """
+    row = conn.execute(_WORKSPACE_ROW_SQL, (task_id,)).fetchone()
+    stored = ((row["workspace_path"] if row else None) or "").strip() or None
+    canonical = _canonical_workspace_path(stored) if stored else None
+    return {
+        "reason": RETENTION_REASON,
+        "workspace_kind": _kb._row_get(row, "workspace_kind"),
+        "path": canonical,
+        "branch": (_kb._row_get(row, "branch_name") or "").strip() or None,
+        "head": _workspace_head(canonical),
+        # An interactive CLI pass carries no profile; a worker's completion does.
+        "actor": (os.environ.get("HERMES_PROFILE") or "").strip() or None,
+    }
+
+
+def record_workspace_retention(
+    conn: sqlite3.Connection, task_id: str, *, record: dict, run_id: Optional[int]
+) -> None:
+    """Make *task_id* a durable workspace holder and append its audit event.
+
+    Runs inside the caller's completion transaction, after the terminal UPDATE
+    won its row, so the hold and its audit record commit with the completion or
+    not at all.
+    """
+    conn.execute("UPDATE tasks SET workspace_retained = 1 WHERE id = ?", (task_id,))
+    _kb._append_event(conn, task_id, "workspace_retained", dict(record), run_id=run_id)
+
+
 def _cleanup_workspace(conn: sqlite3.Connection, task_id: str) -> None:
     """Remove a task's scratch workspace dir and kill its stale tmux session.
     Called from :func:`complete_task` after the transaction commits; best-effort
     so cleanup never blocks completion. ``scratch`` is removed; ``worktree``
     only when provably free of work (clean tree, every commit reachable from a
-    remote-tracking ref); ``dir`` is intentionally preserved."""
+    remote-tracking ref); ``dir`` is intentionally preserved. A retained task
+    keeps its workspace: the hold skips the whole cascade, parents and worker
+    session included."""
     try:
         row = conn.execute(_WORKSPACE_ROW_SQL, (task_id,)).fetchone()
         if not row:
+            return
+        if row["workspace_retained"]:
+            _kb._log.debug(
+                "Keeping workspace for task %s: retained at completion (%s)",
+                task_id, row["workspace_path"],
+            )
             return
         kind: Optional[str] = row["workspace_kind"]
         path: Optional[str] = row["workspace_path"]
@@ -499,7 +608,8 @@ def _cleanup_worktree_workspace(
 def _try_cleanup_parent_workspaces(conn: sqlite3.Connection, task_id: str) -> None:
     """Run the deferred cleanup of any parent scratch/worktree workspace whose
     children are now all done/archived/failed/cancelled (called after each
-    child completes).
+    child completes). A parent that completed with a retention hold is skipped:
+    its workspace is the durable record, not a deferred deletion.
 
     See #33774.
     """
@@ -514,6 +624,7 @@ def _try_cleanup_parent_workspaces(conn: sqlite3.Connection, task_id: str) -> No
                 not row
                 or row["workspace_kind"] not in _REMOVABLE_KINDS
                 or not row["workspace_path"]
+                or row["workspace_retained"]
                 or not _is_terminal_task(conn, parent_id)
                 or _has_active_children(conn, parent_id)
             ):

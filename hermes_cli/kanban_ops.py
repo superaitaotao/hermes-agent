@@ -303,7 +303,10 @@ def _cmd_watch(args: argparse.Namespace) -> int:
 
 
 def _cmd_gc(args: argparse.Namespace) -> int:
-    """Remove archived tasks' scratch workspaces, old events, and old worker logs."""
+    """Remove archived tasks' scratch workspaces, old events, and old worker logs.
+
+    A card that completed with a retention hold keeps its workspace through
+    archive, so its row is not a gc candidate."""
     import shutil
     event_days = getattr(args, "event_retention_days", 30)
     log_days = getattr(args, "log_retention_days", 30)
@@ -315,6 +318,9 @@ def _cmd_gc(args: argparse.Namespace) -> int:
         rows = conn.execute(
             "SELECT id, workspace_kind, workspace_path, branch_name FROM tasks "
             "WHERE status = 'archived'"
+            # A completed card's durable hold outlives archive: gc is the last
+            # sweep that used to win, so it honours the hold too.
+            " AND COALESCE(workspace_retained, 0) = 0"
         ).fetchall()
         for row in rows:
             if row["workspace_kind"] == "worktree":
