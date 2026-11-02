@@ -289,6 +289,12 @@ guard. Missing files, directories, devices, protected targets and oversize files
 are refused without storing an attachment. File reads are bounded to the cap
 plus one byte, including when a source grows during the read.
 
+:::note Remote terminal backends
+A terminal running in Docker, Modal or SSH does not make its filesystem visible
+to `kanban_attach`. Transfer or mount the artifact onto the Hermes tool process
+host before passing its host path. The tool never silently reads a remote path.
+To let remote workers read existing attachments, also mount the board's
+`attachments/` directory so the absolute paths in worker context are reachable.
 :::
 
 
