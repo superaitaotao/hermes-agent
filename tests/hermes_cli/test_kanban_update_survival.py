@@ -35,12 +35,12 @@ print(json.dumps({'metadata_open':c['properties']['metadata'].get('additionalPro
 @pytest.mark.parametrize("selection", ["main", "stable", "unpatched-main"])
 def test_actual_update_preserves_contracts_only_on_patched_fork_main(releases, monkeypatch, selection):
     root = Path(__file__).resolve().parents[2]
-    current = (root / "tools/kanban_tools_schemas.py").read_text(encoding="utf-8-sig")
-    # Executable release-shaped fixture, independent of shallow CI Git history.
-    namespace = {}
-    exec(compile(current, "schema.py", "exec"), namespace)
-    attach = namespace["KANBAN_ATTACH_SCHEMA"]
-    complete = namespace["KANBAN_COMPLETE_SCHEMA"]
+    import copy
+    from tools.kanban_tools_schemas import KANBAN_ATTACH_SCHEMA, KANBAN_COMPLETE_SCHEMA
+
+    current = f"KANBAN_ATTACH_SCHEMA = {KANBAN_ATTACH_SCHEMA!r}\nKANBAN_COMPLETE_SCHEMA = {KANBAN_COMPLETE_SCHEMA!r}\n"
+    attach = copy.deepcopy(KANBAN_ATTACH_SCHEMA)
+    complete = copy.deepcopy(KANBAN_COMPLETE_SCHEMA)
     attach["parameters"]["properties"].pop("path")
     attach["parameters"]["required"] = ["filename", "content_base64"]
     complete["parameters"]["properties"].pop("published_pr")
