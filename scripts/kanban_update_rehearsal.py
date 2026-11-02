@@ -42,7 +42,9 @@ def namespace_preflight(helpers=False):
         fields = line.split()
         destination, options = fields[4], fields[5].split(",")
         kind = fields[fields.index("-") + 1]
-        if "rw" in options and kind not in {"tmpfs", "proc", "devpts", "mqueue"} and not destination.startswith("/trial"):
+        device = kind == "devtmpfs" and destination in {
+            "/dev/null", "/dev/zero", "/dev/full", "/dev/random", "/dev/urandom", "/dev/tty"}
+        if "rw" in options and kind not in {"tmpfs", "proc", "devpts", "mqueue"} and not device and not destination.startswith("/trial"):
             raise ValueError("Writable persisted mount outside /trial")
         mounts.append({"destination": destination, "kind": kind, "writable": "rw" in options})
     for root in (Path("/trial/home"), Path("/trial/state"), Path("/trial/run")):
