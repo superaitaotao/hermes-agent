@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.hermes_cli.test_kanban_pr_acceptance import github  # noqa: F401
+pytest_plugins = ("tests.hermes_cli.test_kanban_pr_acceptance",)
 
 
 @pytest.fixture
@@ -111,7 +111,7 @@ def _dispatch_task(conn, monkeypatch):
 
 
 @pytest.mark.platforms("linux")
-@pytest.mark.parametrize("source", ["top-level", "metadata", "matching"])
+@pytest.mark.parametrize("source", ["top-level", "top-level-no-metadata", "metadata", "matching"])
 def test_registry_completion_normalizes_publication(github, monkeypatch, source):
     from hermes_cli import kanban_db as kb
     from hermes_cli.kanban_db_connect import connect
@@ -121,10 +121,12 @@ def test_registry_completion_normalizes_publication(github, monkeypatch, source)
     with connect() as conn:
         tid = _dispatch_task(conn, monkeypatch)
         metadata = {"findings": [{"severity": "P2", "paths": ["tools/example.py"]}]}
-        args = {"summary": "Verified publication.", "metadata": metadata}
+        args = {"summary": "Verified publication."}
+        if source != "top-level-no-metadata":
+            args["metadata"] = metadata
         if source != "metadata":
             args["published_pr"] = PR_URL
-        if source != "top-level":
+        if source in {"metadata", "matching"}:
             metadata["published_pr"] = PR_URL
         original = copy.deepcopy(args)
         before = _completion_snapshot(conn, tid)
@@ -135,10 +137,10 @@ def test_registry_completion_normalizes_publication(github, monkeypatch, source)
         assert kb.get_task(conn, tid).completion_contract == PR_URL
         run = kb.latest_run(conn, tid)
         assert run.outcome == "completed"
-        assert run.metadata == {
-            "published_pr": PR_URL,
-            "findings": [{"severity": "P2", "paths": ["tools/example.py"]}],
-        }
+        expected = {"published_pr": PR_URL}
+        if source != "top-level-no-metadata":
+            expected["findings"] = [{"severity": "P2", "paths": ["tools/example.py"]}]
+        assert run.metadata == expected
         receipt = json.loads(conn.execute(
             "SELECT payload FROM task_events WHERE task_id=? AND kind='pr_acceptance'",
             (tid,)).fetchone()[0])
