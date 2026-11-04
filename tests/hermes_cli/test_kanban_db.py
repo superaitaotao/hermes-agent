@@ -1665,7 +1665,7 @@ def test_default_spawn_pins_repo_root_on_module_worker_pythonpath(tmp_path, monk
     for resolved in ([sys.executable, "-m", "hermes_cli.main"], ["/opt/hermes/bin/hermes"]):
         monkeypatch.setattr(kbd, "_resolve_hermes_argv", lambda resolved=resolved: resolved)
         kbd._default_spawn(task, str(tmp_path / "ws"))
-        assert captured["cmd"][-3:] == [sys.executable, "-m", "hermes_cli.kanban_worker_client"]
+        assert captured["cmd"][-4:] == [sys.executable, "-P", "-m", "hermes_cli.kanban_worker_client"]
         assert captured["env"]["PYTHONPATH"].split(os.pathsep)[0] == root
 
 
@@ -2082,3 +2082,49 @@ def test_archive_non_running_task_does_not_attempt_termination(kanban_home):
             (t,),
         ).fetchone()
         assert row is None
+
+
+def test_worker_argv_ignores_a_hermes_checkout_workspace(tmp_path):
+    """A card whose workspace is itself a Hermes checkout must not shadow the installed worker.
+
+    The worker runs with the card's workspace as cwd. ``python -m`` puts cwd first on
+    ``sys.path``, so a fork-branch workspace with its own ``hermes_cli/`` package won the
+    import: a branch without ``kanban_worker_client`` died on ``No module named`` before the
+    worker acknowledged ownership (every run crashed and spent the card's failure limit), and
+    a branch with it silently ran branch code. The worker interpreter must run in safe-path
+    mode so only the pinned install root (PYTHONPATH) resolves ``hermes_cli``.
+    """
+    import os
+    import subprocess
+    import sys
+
+    from hermes_cli import kanban_db_dispatch as kbd
+
+    install = tmp_path / "install"
+    (install / "hermes_cli").mkdir(parents=True)
+    (install / "hermes_cli" / "__init__.py").write_text("")
+    (install / "hermes_cli" / "kanban_worker_client.py").write_text("print('INSTALLED')\n")
+    decoy = tmp_path / "fork-workspace"
+    (decoy / "hermes_cli").mkdir(parents=True)
+    (decoy / "hermes_cli" / "__init__.py").write_text("")
+
+    task = kb.Task(
+        id="t_shadow", title="x", body=None, assignee="coder", status="ready",
+        priority=0, created_by=None, created_at=0, started_at=None, completed_at=None,
+        workspace_kind="dir", workspace_path=str(decoy), claim_lock=None,
+        claim_expires=None, tenant=None, branch_name=None,
+    )
+    cmd = kbd._worker_argv(task, "coder", None)
+    assert cmd[0] == sys.executable
+    assert cmd[-2:] == ["-m", "hermes_cli.kanban_worker_client"]
+
+    env = {k: v for k, v in os.environ.items() if not k.startswith("PYTHON")}
+    env["PYTHONPATH"] = str(install)
+    # -S keeps the test venv's editable-install finder out, so only sys.path order decides,
+    # exactly as on the managed runtime interpreter the gateway spawns with.
+    r = subprocess.run(
+        [cmd[0], "-S", *cmd[1:]],
+        cwd=decoy, env=env, capture_output=True, text=True, encoding="utf-8", timeout=60, check=False,
+    )
+    assert r.returncode == 0, r.stderr[-500:]
+    assert r.stdout.strip() == "INSTALLED"
