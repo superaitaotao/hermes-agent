@@ -1026,15 +1026,30 @@ def _read_attach_path(path_arg: str, filename_arg) -> tuple[bytes, str]:
     from pathlib import Path
     from agent.file_safety import get_read_block_error
     from hermes_cli import kanban_db as _kb
-    src = Path(path_arg).expanduser()
-    _check(src.is_absolute(), f"path must be absolute: {path_arg}")
-    blocked = get_read_block_error(str(src))
+    import stat
+
+    blocked = get_read_block_error(path_arg)
     _check(not blocked, f"path refused: {blocked}")
-    _check(src.is_file(), f"path is not a readable regular file: {path_arg}")
-    _check(src.stat().st_size <= _kb.KANBAN_ATTACHMENT_MAX_BYTES,
-           f"attachment exceeds {_kb.KANBAN_ATTACHMENT_MAX_BYTES // (1024 * 1024)} MB limit")
+    src = Path(path_arg)
+    _check(src.is_absolute(), "path must be absolute on the Hermes tool process host, "
+           "not the remote terminal backend")
+    target = src.resolve(strict=True)
+    blocked = get_read_block_error(str(target))
+    _check(not blocked, f"path refused: {blocked}")
+    _check(stat.S_ISREG(target.stat().st_mode), "path is not a readable regular file")
+    # Nonblocking open prevents a swapped-in FIFO from hanging the worker.
+    flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(target, flags)
+    with os.fdopen(fd, "rb") as stream:
+        opened = os.fstat(stream.fileno())
+        _check(stat.S_ISREG(opened.st_mode), "path is not a readable regular file")
+        cap = _kb.KANBAN_ATTACHMENT_MAX_BYTES
+        limit_error = f"attachment exceeds {cap // (1024 * 1024)} MB limit"
+        _check(opened.st_size <= cap, limit_error)
+        data = stream.read(cap + 1)
+        _check(len(data) <= cap and os.fstat(stream.fileno()).st_size <= cap, limit_error)
     filename = str(filename_arg or "").strip() or src.name
-    return src.read_bytes(), filename
+    return data, filename
 
 
 @_kanban_handler("kanban_attach")

@@ -382,8 +382,9 @@ KANBAN_ATTACH_SCHEMA = _schema(
     {
         "task_id": _prop("string", _DESC_TASK_ID_DEFAULT),
         "path": _prop("string", (
-                "Absolute path of a local file to attach (preferred). "
-                "Read server-side, byte-exact, up to 25 MB."
+                "Absolute path on the Hermes tool process host (preferred), "
+                "not the remote terminal backend. Read server-side, byte-exact, "
+                "up to 25 MiB. Exactly one nonblank path or content_base64 is required."
         )),
         "filename": _prop("string", (
                 "File name to store it under (e.g. 'report.pdf'). Optional "

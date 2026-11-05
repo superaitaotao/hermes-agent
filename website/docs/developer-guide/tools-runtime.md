@@ -16,6 +16,36 @@ Primary files:
 - `tools/terminal_tool.py`
 - `tools/environments/*`
 
+## Kanban file transport and runtime verification
+
+`kanban_attach` accepts exactly one nonblank `path` or `content_base64`. Paths
+are absolute on the Hermes tool process host, not a Docker/Modal/SSH terminal
+backend. The shared file-read guard checks both raw input and the resolved
+regular-file target; permitted symlinks are followed. The opened descriptor is
+checked and read once with a 25 MiB + 1 byte bound. Refusals never call storage.
+Base64 compatibility, filename sanitation and worker ownership stay unchanged.
+
+`scripts/verify_kanban_runtime_contracts.py --read-only --source <checkout>`
+prints sanitized registered schemas without dispatching a lifecycle mutation.
+`--selection-only` also reads origin/channel selection without fetching refs.
+`--runtime-ready --expected-sha <sha>` requires lazy installs disabled and checks
+the installation's published launcher in a fresh PM-selected child, dependency
+currency, pending obligations, critical imports and read-only state readers.
+With no mode flag, contract dispatch uses a disposable board and refuses
+inherited worker ownership. It never completes a live task.
+
+`--rehearse-update --target-mode local-fixture --candidate <sha> --installed <sha>`
+uses a task-owned independent clone and local bare `main` at the exact candidate.
+Bubblewrap isolation is mandatory: native HOME, profiles, runtime store, XDG
+roots and host-state all live below `/trial`; no host home or service bus is
+mounted. The runner prepares the old release, executes actual check/update
+commands, repeats at the same head, advances a test-only descendant, then
+prepares old and candidate runtimes again. Each phase retains exits, logs and
+readback. `published-fork` instead requires the maintained fork's exact main
+head before and after updates and does not create a descendant. Neither mode
+installs into a live checkout or starts services. Evidence remains in its
+private trial directory on failure; inspect it before any cleanup.
+
 ## Tool registration model
 
 Each tool module calls `registry.register(...)` at import time.
