@@ -624,6 +624,16 @@ def test_bind_project_refuses_an_active_run_without_a_recorded_worker(
     _assert_untouched(kanban_conn, tid, row=row, events=events)
 
 
+def test_bind_project_refuses_a_previously_started_todo_card(kanban_conn, project, git_repo):
+    tid = _nominated_card(kanban_conn, git_repo)
+    with kb.write_txn(kanban_conn):
+        kanban_conn.execute("UPDATE tasks SET started_at = 1 WHERE id = ?", (tid,))
+    card = kb.get_task(kanban_conn, tid)
+    row, events = _row(kanban_conn, tid), _events(kanban_conn, tid)
+    assert "task_already_started" in _reasons(kanban_conn, card, project)
+    _assert_untouched(kanban_conn, tid, row=row, events=events)
+
+
 def test_bind_project_refuses_a_live_historical_worker(kanban_conn, project, git_repo):
     tid = _nominated_card(kanban_conn, git_repo)
     card = kb.get_task(kanban_conn, tid)

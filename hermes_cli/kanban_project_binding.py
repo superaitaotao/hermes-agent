@@ -35,7 +35,7 @@ PROJECT_BOUND_EVENT = "project_bound"
 _GIT_TIMEOUT_SECONDS = 30
 _CARD_COLUMNS = (
     "id", "title", "created_at", "status", "workspace_kind", "workspace_path", "branch_name",
-    "project_id", "claim_lock", "claim_expires", "current_run_id",
+    "project_id", "started_at", "claim_lock", "claim_expires", "current_run_id",
     "worker_pid", "worker_started_at",
 )
 _BINDING_COLUMNS = ("project_id", "workspace_path", "branch_name")
@@ -50,6 +50,7 @@ UPDATE tasks
    AND workspace_path = ?
    AND workspace_kind = 'worktree'
    AND status = ?
+   AND started_at IS NULL
    AND claim_lock IS NULL
    AND claim_expires IS NULL
    AND worker_pid IS NULL
@@ -83,6 +84,7 @@ class _Card:
     workspace_path: Optional[str]
     branch_name: Optional[str]
     project_id: Optional[str]
+    started_at: Optional[int]
     claim_lock: Optional[str]
     claim_expires: Optional[int]
     current_run_id: Optional[int]
@@ -253,6 +255,8 @@ def _card_refusals(conn: sqlite3.Connection, card: _Card) -> list[str]:
         reasons.append(
             f"task_not_todo: status={card.status!r}; only an unstarted todo card may be repaired"
         )
+    if card.started_at is not None:
+        reasons.append(f"task_already_started: started_at={card.started_at}")
     for column in ("claim_lock", "claim_expires", "current_run_id", "worker_pid"):
         value = getattr(card, column)
         if value:
