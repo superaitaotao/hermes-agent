@@ -478,8 +478,9 @@ reason, so a later reader can tell an audited repair from a normal create.
 It derives the target itself — `<primary_path>/.worktrees/<task-id>` and the
 deterministic `<project-slug>/<task-id>-<title-slug>` branch — and refuses,
 changing nothing, when the card is not an unstarted unclaimed `todo` worktree
-card, when its anchor is not exactly the canonical project root, when any pid it
-ever recorded is still running (or its liveness cannot be inspected), when the
+card, when its anchor is not exactly the canonical project root, when a run has
+not ended, when any pid it ever recorded is still running, when a task-owned
+child is still running (or process ownership cannot be inspected), when the
 project is unknown, archived, scoped to another board or lacks a primary path,
 when the repository root cannot be proven, when the target directory or branch
 already exists, or when the board dispatch lock cannot be held for the whole

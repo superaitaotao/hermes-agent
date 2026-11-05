@@ -568,6 +568,103 @@ def test_bind_project_refuses_a_card_changed_between_validation_and_apply(
     assert _events(kanban_conn, tid, "project_bound") == []
 
 
+def test_bind_project_refuses_a_task_owned_child_without_a_recorded_worker(
+    kanban_conn, project, git_repo,
+):
+    tid = _nominated_card(kanban_conn, git_repo)
+    card = kb.get_task(kanban_conn, tid)
+    row, events = _row(kanban_conn, tid), _events(kanban_conn, tid)
+    env = dict(os.environ, HERMES_KANBAN_TASK=tid)
+    child = subprocess.Popen(
+        [sys.executable, "-c", "import sys; print('ready', flush=True); sys.stdin.read()"],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, encoding="utf-8", env=env,
+    )
+    try:
+        assert child.stdout is not None
+        assert child.stdout.readline().strip() == "ready"
+        assert "task_process_running" in _reasons(kanban_conn, card, project)
+        _assert_untouched(kanban_conn, tid, row=row, events=events)
+    finally:
+        child.communicate(timeout=10)
+    assert child.returncode == 0
+    assert _bind(kanban_conn, card, project)["status"] == "applied"
+
+
+def test_bind_project_refuses_unavailable_task_process_inspection(
+    kanban_conn, project, git_repo, monkeypatch,
+):
+    import psutil
+
+    tid = _nominated_card(kanban_conn, git_repo)
+    card = kb.get_task(kanban_conn, tid)
+    row, events = _row(kanban_conn, tid), _events(kanban_conn, tid)
+
+    def denied():
+        raise psutil.AccessDenied(pid=os.getpid())
+
+    with monkeypatch.context() as patcher:
+        patcher.setattr(psutil, "process_iter", denied)
+        assert "process_inspection_unavailable" in _reasons(kanban_conn, card, project)
+    _assert_untouched(kanban_conn, tid, row=row, events=events)
+    assert _bind(kanban_conn, card, project)["status"] == "applied"
+
+
+def test_bind_project_refuses_an_active_run_without_a_recorded_worker(
+    kanban_conn, project, git_repo,
+):
+    tid = _nominated_card(kanban_conn, git_repo)
+    card = kb.get_task(kanban_conn, tid)
+    with kb.write_txn(kanban_conn):
+        kanban_conn.execute(
+            "INSERT INTO task_runs(task_id, profile, status, started_at) VALUES (?, ?, ?, ?)",
+            (tid, "twohomes-coder", "running", 1),
+        )
+    row, events = _row(kanban_conn, tid), _events(kanban_conn, tid)
+    assert "task_run_active" in _reasons(kanban_conn, card, project)
+    _assert_untouched(kanban_conn, tid, row=row, events=events)
+
+
+def test_bind_project_refuses_a_live_historical_worker(kanban_conn, project, git_repo):
+    tid = _nominated_card(kanban_conn, git_repo)
+    card = kb.get_task(kanban_conn, tid)
+    with kb.write_txn(kanban_conn):
+        kanban_conn.execute(
+            "INSERT INTO task_runs(task_id, profile, status, started_at, ended_at, worker_pid) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (tid, "twohomes-coder", "crashed", 1, 2, os.getpid()),
+        )
+    row, events = _row(kanban_conn, tid), _events(kanban_conn, tid)
+    assert "worker_still_running" in _reasons(kanban_conn, card, project)
+    _assert_untouched(kanban_conn, tid, row=row, events=events)
+
+
+@pytest.mark.parametrize("target_kind", ["directory", "branch"])
+def test_bind_project_revalidates_target_availability_under_the_dispatch_lock(
+    kanban_conn, project, git_repo, monkeypatch, target_kind,
+):
+    kpb = _kpb()
+    tid = _nominated_card(kanban_conn, git_repo)
+    card = kb.get_task(kanban_conn, tid)
+    row, events = _row(kanban_conn, tid), _events(kanban_conn, tid)
+    real_exclusion = kpb._dispatch_exclusion
+
+    @contextlib.contextmanager
+    def target_appears(conn):
+        with real_exclusion(conn):
+            if target_kind == "directory":
+                (git_repo / ".worktrees" / tid).mkdir(parents=True)
+            else:
+                _git(git_repo, "-c", "user.email=w01@example.com", "-c", "user.name=w01",
+                     "commit", "--allow-empty", "-m", "init")
+                _git(git_repo, "branch", f"{project.slug}/{tid}-repair-the-project-link")
+            yield
+
+    monkeypatch.setattr(kpb, "_dispatch_exclusion", target_appears)
+    expected = "target_path_exists" if target_kind == "directory" else "target_branch_exists"
+    assert expected in _reasons(kanban_conn, card, project)
+    _assert_untouched(kanban_conn, tid, row=row, events=events)
+
+
 # ---------------------------------------------------------------------------
 # CLI wiring: parser + profile-scoped canonical store + JSON (one subprocess)
 # ---------------------------------------------------------------------------
@@ -580,7 +677,7 @@ def _run_hermes(home: Path, *args: str) -> subprocess.CompletedProcess:
     env["HERMES_KANBAN_HOME"] = str(home / ".hermes")
     for name in (
         "HERMES_KANBAN_BOARD", "HERMES_KANBAN_DB", "HERMES_KANBAN_TASK",
-        "HERMES_KANBAN_WORKSPACES_ROOT", "HERMES_DELEGATED_CHILD_CONTEXT",
+        "HERMES_KANBAN_WORKSPACES_ROOT",
     ):
         env.pop(name, None)
     env["PYTHONPATH"] = str(ROOT) + os.pathsep + env.get("PYTHONPATH", "")

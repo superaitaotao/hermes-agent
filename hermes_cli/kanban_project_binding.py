@@ -34,7 +34,7 @@ PROJECT_BOUND_EVENT = "project_bound"
 
 _GIT_TIMEOUT_SECONDS = 30
 _CARD_COLUMNS = (
-    "id", "title", "status", "workspace_kind", "workspace_path", "branch_name",
+    "id", "title", "created_at", "status", "workspace_kind", "workspace_path", "branch_name",
     "project_id", "claim_lock", "claim_expires", "current_run_id",
     "worker_pid", "worker_started_at",
 )
@@ -77,6 +77,7 @@ class _Card:
 
     id: str
     title: str
+    created_at: int
     status: str
     workspace_kind: str
     workspace_path: Optional[str]
@@ -256,8 +257,35 @@ def _card_refusals(conn: sqlite3.Connection, card: _Card) -> list[str]:
         value = getattr(card, column)
         if value:
             reasons.append(f"task_not_inactive: {column}={value!r}")
+    active_runs = conn.execute(
+        "SELECT id FROM task_runs WHERE task_id = ? AND ended_at IS NULL", (card.id,),
+    ).fetchall()
+    if active_runs:
+        reasons.append(f"task_run_active: runs {[row['id'] for row in active_runs]} have not ended")
     reasons.extend(_process_refusals(conn, card))
+    reasons.extend(_task_process_refusals(card))
     return reasons
+
+
+def _task_process_refusals(card: _Card) -> list[str]:
+    import psutil
+
+    try:
+        owner = psutil.Process().username()
+        for process in psutil.process_iter():
+            try:
+                if process.username() != owner or process.status() == psutil.STATUS_ZOMBIE:
+                    continue
+                # Linux boot-time rounding can put psutil birth times up to a second early.
+                if process.create_time() < card.created_at - 2:
+                    continue
+                if process.environ().get("HERMES_KANBAN_TASK") == card.id:
+                    return [f"task_process_running: card {card.id} owns live pid {process.pid}"]
+            except psutil.NoSuchProcess:
+                continue
+    except (psutil.Error, OSError) as exc:
+        return [f"process_inspection_unavailable: cannot inspect task-owned processes ({exc})"]
+    return []
 
 
 def _process_refusals(conn: sqlite3.Connection, card: _Card) -> list[str]:
@@ -553,6 +581,9 @@ def _revalidate(conn: sqlite3.Connection, proposal: _Proposal) -> None:
             f"project_changed_since_validation: {project.as_source()!r} is no longer "
             f"{proposal.project.as_source()!r}",
         ])
+    reasons = _target_refusals(project, proposal.new)
+    if reasons:
+        raise BindingRefused(reasons)
 
 
 def _apply(conn: sqlite3.Connection, proposal: _Proposal) -> None:
