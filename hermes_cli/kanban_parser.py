@@ -257,6 +257,23 @@ _SPECS = [
              help="Provider the model belongs to (worker is spawned with "
                   "--provider <name>). Cleared together with the model."),
     ], help="Set or clear a task's model/provider override (takes effect on the next dispatch)"),
+    _cmd("bind-project", [
+        _TASK_ID,
+        _arg("--project", required=True,
+             help="Canonical project (id, or a slug that resolves to it) the card must be bound to."),
+        _arg("--expected-workspace", required=True, metavar="PATH",
+             help="The repository root the card's worktree anchor must currently equal, so an "
+                  "unexpected anchor refuses instead of being rebound."),
+        _arg("--expected-branch-null", action="store_true", required=True,
+             help="Assert the card currently has no branch. Required: this verb repairs null "
+                  "bindings only."),
+        _arg("--reason", required=True,
+             help="Why this repair is authorized (recorded on the project_bound receipt)."),
+        _arg("--dry-run", action="store_true",
+             help="Validate and print the proposed binding without writing anything."),
+        _json_flag(help="Emit JSON output"),
+    ], help="Operator-only repair: bind an unstarted null-linked card to its project "
+            "(derives the isolated worktree path and branch; writes one receipt event)"),
     _cmd("reclaim", [_TASK_ID, _RECLAIM_REASON], help="Release an active worker claim on a running task"),
     _cmd("reassign", [
         _TASK_ID,
